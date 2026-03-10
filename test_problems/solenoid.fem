@@ -1,0 +1,112 @@
+[Format]      =  1
+[Frequency]   =  0
+[Precision]   =  1e-08
+[MinAngle]    =  30
+[DoSmartMesh] =  1
+[Depth]       =  1
+[LengthUnits] =  millimeters
+[ProblemType] =  planar
+[Coordinates] =  cartesian
+[Comment]     =  "Simple solenoid test problem"
+[PointProps]   = 0
+[BdryProps]   = 1
+  <BeginBdry>
+    <BdryName> = "A=0"
+    <BdryType> = 0
+    <A_0> = 0
+    <A_1> = 0
+    <A_2> = 0
+    <phi> = 0
+    <Mu_ssd> = 0
+    <Sigma_ssd> = 0
+    <c0> = 0
+    <c0i> = 0
+    <c1> = 0
+    <c1i> = 0
+    <InnerAngle> = 0
+    <OuterAngle> = 0
+  <EndBdry>
+[BlockProps]  = 3
+  <BeginBlock>
+    <BlockName> = "Air"
+    <mu_x> = 1
+    <mu_y> = 1
+    <H_c> = 0
+    <H_cAngle> = 0
+    <J_re> = 0
+    <J_im> = 0
+    <sigma> = 0
+    <d_lam> = 0
+    <phi_h> = 0
+    <phi_hx> = 0
+    <phi_hy> = 0
+    <LamType> = 0
+    <LamFill> = 1
+    <NStrands> = 0
+    <WireD> = 0
+    <BHPoints> = 0
+  <EndBlock>
+  <BeginBlock>
+    <BlockName> = "Coil"
+    <mu_x> = 1
+    <mu_y> = 1
+    <H_c> = 0
+    <H_cAngle> = 0
+    <J_re> = 1
+    <J_im> = 0
+    <sigma> = 0
+    <d_lam> = 0
+    <phi_h> = 0
+    <phi_hx> = 0
+    <phi_hy> = 0
+    <LamType> = 0
+    <LamFill> = 1
+    <NStrands> = 0
+    <WireD> = 0
+    <BHPoints> = 0
+  <EndBlock>
+  <BeginBlock>
+    <BlockName> = "Iron"
+    <mu_x> = 1000
+    <mu_y> = 1000
+    <H_c> = 0
+    <H_cAngle> = 0
+    <J_re> = 0
+    <J_im> = 0
+    <sigma> = 0
+    <d_lam> = 0
+    <phi_h> = 0
+    <phi_hx> = 0
+    <phi_hy> = 0
+    <LamType> = 0
+    <LamFill> = 1
+    <NStrands> = 0
+    <WireD> = 0
+    <BHPoints> = 0
+  <EndBlock>
+[CircuitProps]  = 1
+  <BeginCircuit>
+    <CircuitName> = "Coil"
+    <TotalAmps_re> = 1000
+    <TotalAmps_im> = 0
+    <CircuitType> = 1
+  <EndCircuit>
+[NumPoints] = 6
+10	30	0	0
+10	70	0	0
+20	70	0	0
+20	30	0	0
+20	110	0	0
+20	-10	0	0
+[NumSegments] = 4
+0	1	-1	0	0	0
+1	2	-1	0	0	0
+2	3	-1	0	0	0
+3	0	-1	0	0	0
+[NumArcSegments] = 2
+4	5	180	10	1	0	0
+5	4	180	10	1	0	0
+[NumHoles] = 0
+[NumBlockLabels] = 2
+25	50	1	0.79788456080286541	0	0	0	1	0
+15	50	2	0.50462650440403201	1	0	0	100	0
