@@ -6,7 +6,71 @@
 
 ---
 
-## Session 2026-03-10 — UX Polish, Density Plot, Motion Dialog, GitHub Setup
+## Session 2026-03-11 — Adaptive Refinement: Fix Runaway Mesh Growth
+
+**Scope:** Debugging and fixing the adaptive refinement algorithm that was producing insane mesh growth (4× per iteration instead of ~1.4×), causing the solver to fail on complex models like the LRK motor.
+
+### 1. Root Cause: Tolerance-Based θ Refined ALL Regions
+
+**Problem:** Running adaptive refinement on the LRK motor (29 regions, 36K elements, 11% global error) at 0.1% tolerance caused the mesh to explode from 36K → 146K elements in a single iteration. The solver then failed (PCG divergence or NaN).
+
+**Root cause:** The original `computeRegionTargetAreas()` computed each region's θ ratio as:
+```
+budget = tolerance × sqrt(N_r / N)
+θ = budget / regionErr
+```
+With tolerance=0.001 and globalErr=0.11, θ was tiny for every region (0.006–0.28), meaning **all 29 regions** were flagged for refinement. The global growth cap (1.5×) couldn't compensate enough — scaling all 29 θ values up still produced ~4× growth because the cap was applied uniformly.
+
+**The key insight:** The tolerance should control *when the loop stops*, not *how aggressive each step is*. Trying to jump from 11% error to 0.1% in one step is unreasonable — it requires refining everything by 100×.
+
+### 2. Fix: Step-Target Decoupled from Tolerance
+
+**Solution:** Each iteration now targets an intermediate error level — halving the current global error — rather than jumping to the final tolerance:
+
+```
+stepTarget = max(globalErr / 2, tolerance)
+```
+
+- At 11% error: stepTarget = 5.5% (regardless of whether tolerance is 0.1% or 5%)
+- At 5% error: stepTarget = 2.5%
+- And so on, until globalErr < tolerance → converge
+
+This makes each step **selective**: regions already below the step budget (θ ≥ 1) are kept unchanged. For the LRK motor at 11% error:
+- **Region 0** (1481 elems, stator teeth): θ ≈ 0.55 → REFINE 1.4×
+- **Region 1** (14385 elems, stator iron): θ ≈ 0.33 → REFINE 2×
+- **All other 27 regions**: θ > 1 → KEEP (already within step budget)
+- **Predicted total growth: ~1.4×** (36K → ~51K), well under the 1.5× cap
+
+The tolerance slider now controls *how many iterations* run (and thus how refined the final mesh is), rather than causing catastrophic single-step growth.
+
+### 3. Algorithm Details (in `computeRegionTargetAreas`)
+
+Controls preserved from the original:
+- **Damping α = 0.6:** θ_damped = θ^0.6 (60% toward optimum in log-space)
+- **Per-region floor:** θ ≥ 1/3 (max 3× refinement per region per step)
+- **Global growth cap:** ≤ 1.5× total elements per step
+- **Selectivity threshold:** only refine if θ_final < 0.8 (regions close to budget are left alone)
+
+Log output format changed to help debugging:
+- Old: `[ADAPTIVE] ZZ prediction: growth=...`
+- New: `[ADAPTIVE] globalErr=..., stepTarget=...` and `[ADAPTIVE] Step: growth=..., N of M regions refined`
+
+### Files Modified
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `gui/adaptiverefine.cpp` | Modified | Rewrote `computeRegionTargetAreas()` — stepTarget approach, updated log format, added block comment explaining the algorithm |
+
+### Gotchas
+
+- **Binary staleness:** The user ran the old binary after the code change and got confused by the old log output (`ZZ prediction` format). Always verify the binary timestamp matches the source changes (`ls -la` on the app binary).
+- **defaultMeshSize in meshgen.cpp:** Triangle's effective area constraint is `min(blockLabel.maxArea, defaultMeshSize)` where `defaultMeshSize = (diagonal/10)^2`. User block labels with large maxArea values (1.25, 2.19) are ignored — Triangle uses defaultMeshSize instead. This means setting `maxArea` to a target only has effect when the target is *smaller* than defaultMeshSize.
+- **test_problems/lrk.fem:** Has local modifications (block label maxArea values changed during testing). Not committed — these are test artifacts.
+
+### Tests
+All 76+ tests passing (8 solver + others). No new tests added — the fix is to the refinement heuristic, which is validated by running the full adaptive loop on real models.
+
+---
 
 **Scope:** Six fixes/features focused on UI polish, rendering quality, motion system rework, and getting the project onto GitHub.
 
