@@ -6,7 +6,49 @@
 
 ---
 
-## Session 2026-03-11 — Adaptive Refinement: Fix Runaway Mesh Growth
+## Session 2026-03-11 — Axisymmetric Geometry Debugging & 3D FEM Discussion
+
+**Scope:** Debugging a solenoid model that produced all-magenta (incorrect) density plots despite correct boundary conditions. Also discussed feasibility of extending to 3D FEM.
+
+### 1. Axisymmetric Arc Boundary Bug (User's Model)
+
+**Problem:** User set up a solenoid with two 180° arcs forming a circular outer boundary with A=0 boundary conditions on both arcs. The density plot showed all-magenta (uniform maximum B) inside the circle — clearly wrong.
+
+**Root cause:** The two arcs formed a complete circle centered at **(r=20, z=50) with radius 60**. The arc endpoints were both at r=20 (nodes at (20, 110) and (20, -10)):
+- **Arc 0** (right semicircle): swept through (80, 50) — fine, r > 0
+- **Arc 1** (left semicircle): swept through **(-40, 50)** — r < 0, physically invalid for axisymmetric problems
+
+In axisymmetric mode, r represents radial distance and must be ≥ 0. Elements with negative r produce garbage in the stiffness matrix (integrals weighted by r flip sign), corrupting the entire solution.
+
+**Resolution:** User switched to **planar mode**, which worked correctly since negative x coordinates are valid in planar. For axisymmetric problems, the correct approach would be a semicircular boundary staying in r ≥ 0 (e.g., nodes on the z-axis with a 180° arc curving rightward, plus a straight segment along r=0).
+
+**No code changes — this was a modeling issue, not a software bug.**
+
+### 2. 3D FEM Feasibility Discussion
+
+User asked what it would take to extend TurboFEMM to 3D. Key points communicated:
+
+- **Meshing:** 2D triangles → 3D tetrahedra. Triangle library can't do this; would need TetGen or Gmsh.
+- **Solver:** Scalar potential A (1 DOF/node) → edge elements (Nédélec, 1 DOF/edge) for proper div(B)=0. Matrix size grows by orders of magnitude (~1M+ unknowns for modest problems).
+- **Visualization:** QPainter 2D rendering → OpenGL/Metal 3D rendering with cut planes, isosurfaces. Essentially a complete rendering rewrite.
+- **Assessment:** This is a new solver that shares material definitions, not a port. Months of work.
+- **Pragmatic note:** Axisymmetric mode already gives 3D results for rotationally symmetric geometries (solenoids, motors) at 2D cost.
+
+**No code changes — discussion only.**
+
+### Files Modified
+
+None.
+
+### Gotchas
+
+- **Arc direction matters for axisymmetric:** Two 180° arcs forming a full circle will always have one arc crossing the z-axis (r=0) into negative r unless the center is at r=0 and the arc endpoints are also on the z-axis. Users should use semicircular boundaries for axisymmetric problems.
+- **No runtime warning:** The solver doesn't currently warn when mesh elements have r < 0 in axisymmetric mode. Could be a useful future enhancement.
+
+### Tests
+No code changes, so no test run needed.
+
+---
 
 **Scope:** Debugging and fixing the adaptive refinement algorithm that was producing insane mesh growth (4× per iteration instead of ~1.4×), causing the solver to fail on complex models like the LRK motor.
 
