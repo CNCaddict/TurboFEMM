@@ -6,6 +6,18 @@ A modernized, GPU-accelerated port of [FEMM 4.2](http://www.femm.info/) (Finite 
 
 ![TurboFEMM Screenshot](https://github.com/CNCaddict/TurboFEMM/releases/download/v0.1.0-alpha/turbofemm-screenshot.png)
 
+## Download
+
+Pre-built macOS binary (Apple Silicon):
+**[Download TurboFEMM-macOS-arm64.dmg](https://github.com/CNCaddict/TurboFEMM/releases/latest)**
+
+### Installation
+1. Open the DMG and drag **TurboFEMM.app** to Applications
+2. First launch: right-click the app and select Open (Gatekeeper warning — not notarized)
+3. Or run: `xattr -cr /Applications/TurboFEMM.app`
+
+**Requirements:** macOS 13+ (Ventura or later), Apple Silicon (M1/M2/M3/M4)
+
 ---
 
 ## What's New vs. Original FEMM 4.2
@@ -89,20 +101,6 @@ The original FEMM can only analyze a single static geometry. TurboFEMM adds a fu
 | Multi-document interface | Single document | Tabbed MDI |
 | Build system | Visual Studio .sln | CMake (cross-platform) |
 | .fem file compatibility | Native | Fully compatible (reads/writes same format) |
-
----
-
-## Download
-
-Pre-built macOS binary (Apple Silicon):
-**[Download TurboFEMM-macOS-arm64.dmg](https://github.com/CNCaddict/TurboFEMM/releases/latest)**
-
-### Installation
-1. Open the DMG and drag **TurboFEMM.app** to Applications
-2. First launch: right-click the app and select Open (Gatekeeper warning — not notarized)
-3. Or run: `xattr -cr /Applications/TurboFEMM.app`
-
-**Requirements:** macOS 13+ (Ventura or later), Apple Silicon (M1/M2/M3/M4)
 
 ---
 
