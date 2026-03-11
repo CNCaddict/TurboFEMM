@@ -36,6 +36,8 @@
 #include <QThread>
 #include <QEventLoop>
 #include <QTimer>
+#include <QScrollBar>
+#include <QTime>
 #include <cstdio>
 
 // Worker thread for running adaptive refinement off the main thread
@@ -57,13 +59,20 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(tr("FEMM 4.2"));
     resize(1200, 800);
 
-    // Central MDI area
+    // Central MDI area + log panel in a vertical splitter
     mdiArea = new QMdiArea(this);
     mdiArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     mdiArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     mdiArea->setViewMode(QMdiArea::TabbedView);
     mdiArea->setTabsClosable(true);
-    setCentralWidget(mdiArea);
+
+    createLogPanel();
+
+    m_splitter = new QSplitter(Qt::Vertical, this);
+    m_splitter->addWidget(mdiArea);
+    m_splitter->addWidget(m_logPanel);
+    m_splitter->setChildrenCollapsible(false);
+    setCentralWidget(m_splitter);
 
     // Mesh generator
     m_meshGen = new MeshGenerator(this);
@@ -103,6 +112,14 @@ MainWindow::MainWindow(QWidget *parent)
     else if (aaVal == (int)AAQuality::Ultra)  actAAUltra->setChecked(true);
     else if (aaVal == (int)AAQuality::Extreme) actAAExtreme->setChecked(true);
     else                                       actAALow->setChecked(true);
+
+    // Restore log panel state and set initial splitter sizes.
+    // Default: visible at one-line height (~24px).
+    bool logVisible = settings.value("view/showLogPanel", true).toBool();
+    int logHeight = settings.value("view/logPanelHeight", 24).toInt();
+    m_logPanel->setVisible(logVisible);
+    if (actShowLog) actShowLog->setChecked(logVisible);
+    m_splitter->setSizes({height() - logHeight, logHeight});
 }
 
 MainWindow::~MainWindow()
@@ -239,6 +256,14 @@ void MainWindow::createMenus()
     connect(actShowBlockLabels, &QAction::toggled,
             this, &MainWindow::onToggleShowBlockLabels);
 
+    // Log panel toggle
+    viewMenu->addSeparator();
+    actShowLog = viewMenu->addAction(tr("Show &Log Panel"));
+    actShowLog->setCheckable(true);
+    actShowLog->setChecked(true);
+    connect(actShowLog, &QAction::toggled,
+            this, &MainWindow::toggleLogPanel);
+
     // Rendering submenu
     viewMenu->addSeparator();
     QMenu *renderMenu = viewMenu->addMenu(tr("&Rendering"));
@@ -346,6 +371,63 @@ void MainWindow::createStatusBar()
     // text doesn't cause the main window to resize on every update.
     statusBar()->setSizeGripEnabled(false);
     statusBar()->setFixedHeight(statusBar()->sizeHint().height());
+}
+
+// ---------------------------------------------------------------
+// Log panel
+// ---------------------------------------------------------------
+
+void MainWindow::createLogPanel()
+{
+    m_logPanel = new QPlainTextEdit();
+    m_logPanel->setReadOnly(true);
+    m_logPanel->setMaximumBlockCount(5000);
+    m_logPanel->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_logPanel->setMinimumHeight(24);
+
+    // Monospace font for log readability
+    QFont mono = QFont("Menlo", 11);
+    mono.setStyleHint(QFont::Monospace);
+    m_logPanel->setFont(mono);
+
+    // Set placeholder text
+    m_logPanel->setPlaceholderText(tr("Solver log output will appear here..."));
+}
+
+void MainWindow::appendLog(const QString &msg)
+{
+    if (!m_logPanel) return;
+
+    // Split multi-line messages and append each line with timestamp
+    QString timestamp = QTime::currentTime().toString("HH:mm:ss");
+    const QStringList lines = msg.split('\n', Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        QString trimmed = line.trimmed();
+        if (!trimmed.isEmpty())
+            m_logPanel->appendPlainText(QString("[%1] %2").arg(timestamp, trimmed));
+    }
+
+    // Auto-scroll to bottom
+    QScrollBar *sb = m_logPanel->verticalScrollBar();
+    sb->setValue(sb->maximum());
+}
+
+void MainWindow::toggleLogPanel(bool visible)
+{
+    if (m_logPanel) {
+        m_logPanel->setVisible(visible);
+        if (visible && m_splitter) {
+            // If panel was hidden, give it some initial height
+            QList<int> sizes = m_splitter->sizes();
+            if (sizes.size() == 2 && sizes[1] == 0) {
+                sizes[0] -= 150;
+                sizes[1] = 150;
+                m_splitter->setSizes(sizes);
+            }
+        }
+    }
+    QSettings settings;
+    settings.setValue("view/showLogPanel", visible);
 }
 
 // ---------------------------------------------------------------
@@ -1632,11 +1714,14 @@ void MainWindow::updateCoordinates(double x, double y)
 
 void MainWindow::updateStatus(const QString &msg)
 {
-    // Show only the last line — solver output can contain multiple lines
-    // which would otherwise expand the status bar and resize the window.
+    // Show only the last line in the status bar — solver output can contain
+    // multiple lines which would otherwise expand the status bar.
     QString line = msg;
     int nl = line.lastIndexOf('\n');
     if (nl >= 0)
         line = line.mid(nl + 1);
     statusLabel->setText(line.trimmed());
+
+    // Append full message to the scrollable log panel
+    appendLog(msg);
 }

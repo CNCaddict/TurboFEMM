@@ -7,6 +7,7 @@
 #include "mesh.h"
 #include "spars.h"
 #include "FemmeDocCore.h"
+#include "anderson.h"
 #define Log log
 
 // #define NEWTON
@@ -229,6 +230,8 @@ BOOL CFemmeDocCore::HarmonicAxisymmetric(CBigComplexLinProb &L)
 		}
 	}
 
+	AndersonAccelerator anderson;
+	anderson.init(2*(NumNodes+NumCircProps), 5);
 
 do{
 
@@ -754,13 +757,17 @@ do{
             res=sqrt(x/y);
         }
 
-        // relaxation if we need it
-        if(Iter>5)
+        // Anderson acceleration with relaxation fallback
+        if(Iter>=1)
         {
-            if ((res>lastres) && (Relax>0.1)) Relax/=2.;
-            else Relax+= 0.1 * (1. - Relax);
-       
-            for(j=0;j<NumNodes+NumCircProps;j++) L.V[j]=Relax*L.V[j]+(1.0-Relax)*V_old[j];
+            if (!anderson.apply((double*)V_old, (double*)L.V)) {
+                // Anderson rejected — fall back to adaptive relaxation
+                if(Iter>5) {
+                    if ((res>lastres) && (Relax>0.1)) Relax/=2.;
+                    else Relax+= 0.1 * (1. - Relax);
+                    for(j=0;j<NumNodes+NumCircProps;j++) L.V[j]=Relax*L.V[j]+(1.0-Relax)*V_old[j];
+                }
+            }
         }
 
        

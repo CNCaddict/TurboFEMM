@@ -8,6 +8,8 @@
 #include <QStatusBar>
 #include <QLabel>
 #include <QActionGroup>
+#include <QPlainTextEdit>
+#include <QSplitter>
 
 class DrawingWidget;
 class FemmeDocument;
@@ -85,10 +87,15 @@ private slots:
     void updateCoordinates(double x, double y);
     void updateStatus(const QString &msg);
 
+    // Log panel
+    void toggleLogPanel(bool visible);
+
 private:
     void createMenus();
     void createToolBars();
     void createStatusBar();
+    void createLogPanel();
+    void appendLog(const QString &msg);
 
     DrawingWidget *currentDrawing();
     FemmeDocument *currentDocument();
@@ -97,6 +104,9 @@ private:
     void loadResultsOverlay(DrawingWidget *dw);
 
     QMdiArea *mdiArea;
+    QSplitter *m_splitter = nullptr;
+    QPlainTextEdit *m_logPanel = nullptr;
+    QAction *actShowLog = nullptr;
 
     // Toolbars
     QToolBar *fileToolBar;

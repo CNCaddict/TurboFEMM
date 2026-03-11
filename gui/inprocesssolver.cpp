@@ -265,6 +265,10 @@ bool InProcessSolver::solveExistingMesh(FemmeDocument *doc,
         if (text && text[0])
             emit progress(QString::fromUtf8(text));
     };
+    dlg.onLogMessage = [this](const char *text) {
+        if (text && text[0])
+            emit progress(QString::fromUtf8(text));
+    };
 
     // Load document data
     if (!Doc.LoadFromDocument(

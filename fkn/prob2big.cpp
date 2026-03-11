@@ -7,6 +7,7 @@
 #include "mesh.h"
 #include "spars.h"
 #include "FemmeDocCore.h"
+#include "anderson.h"
 
 // #define NEWTON
 
@@ -58,6 +59,7 @@ BOOL CFemmeDocCore::Harmonic2D(CBigComplexLinProb &L)
 	static const int MaxNewtonIters = 100;
 	BOOL LinearFlag=TRUE;
 	BOOL bIncremental=FALSE;
+	char logbuf[512];
 
 	if (PrevSoln.GetLength()>0) bIncremental=TRUE;
 	res=0;
@@ -205,12 +207,15 @@ BOOL CFemmeDocCore::Harmonic2D(CBigComplexLinProb &L)
 
 	}
 
+	AndersonAccelerator anderson;
+	anderson.init(2*(NumNodes+NumCircProps), 5);
+
 do{
 
 		TheView->SetDlgItemText(IDC_FRAME1,"Matrix Construction");
 		TheView->m_prog1.SetPos(0);
 		pctr=0;
-	
+
 	if(Iter>0) L.Wipe();
   
 	// first, tack in air gap element contributions
@@ -805,13 +810,17 @@ do{
 			res=sqrt(x/y);
 		}
 
-        // relaxation if we need it
-        if(Iter>5)
+        // Anderson acceleration with relaxation fallback
+        if(Iter>=1)
         {
-            if ((res>lastres) && (Relax>0.1)) Relax/=2.;
-            else Relax+= 0.1 * (1. - Relax);
-       
-            for(j=0;j<NumNodes+NumCircProps;j++) L.V[j]=Relax*L.V[j]+(1.0-Relax)*V_old[j];
+            if (!anderson.apply((double*)V_old, (double*)L.V)) {
+                // Anderson rejected — fall back to adaptive relaxation
+                if(Iter>5) {
+                    if ((res>lastres) && (Relax>0.1)) Relax/=2.;
+                    else Relax+= 0.1 * (1. - Relax);
+                    for(j=0;j<NumNodes+NumCircProps;j++) L.V[j]=Relax*L.V[j]+(1.0-Relax)*V_old[j];
+                }
+            }
         }
 
        
@@ -835,8 +844,10 @@ do{
 
 	// Safety: cap Newton iterations to prevent infinite loop.
 	if(!LinearFlag && Iter >= MaxNewtonIters) {
-		fprintf(stderr, "[fkn]   Newton: max iterations (%d) reached, res=%g. Accepting.\n",
+		snprintf(logbuf, sizeof(logbuf), "Newton: max iterations (%d) reached, res=%g. Accepting.",
 			MaxNewtonIters, res);
+		fprintf(stderr, "[fkn]   %s\n", logbuf);
+		TheView->LogMessage(logbuf);
 		LinearFlag = TRUE;
 	}
 

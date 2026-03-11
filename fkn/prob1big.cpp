@@ -7,6 +7,7 @@
 #include "mesh.h"
 #include "spars.h"
 #include "FemmeDocCore.h"
+#include "anderson.h"
 #include "lua.h"
 
 extern lua_State *lua;
@@ -45,12 +46,15 @@ BOOL CFemmeDocCore::Static2D(CBigLinProb &L)
 	for(i=0;i<NumBlockLabels;i++) GetFillFactor(i);
 
 	// Diagnostic: report solver setup
+	char logbuf[512];
 	{
 		int nonlinCount = 0;
 		for(i=0;i<NumBlockProps;i++)
 			if (blockproplist[i].BHpoints > 0) nonlinCount++;
-		fprintf(stderr, "[fkn]   Static2D: %d materials (%d nonlinear), %d elements, %d labels\n",
+		snprintf(logbuf, sizeof(logbuf), "Static2D: %d materials (%d nonlinear), %d elements, %d labels",
 			NumBlockProps, nonlinCount, NumEls, NumBlockLabels);
+		fprintf(stderr, "[fkn]   %s\n", logbuf);
+		TheView->LogMessage(logbuf);
 	}
 
 	// check to see if any circuits have been defined and process them;
@@ -124,6 +128,9 @@ BOOL CFemmeDocCore::Static2D(CBigLinProb &L)
 	// permeability must be updated from iteration to iteration...
 
 	// build element matrices using the matrices derived in Allaire's book.
+
+	AndersonAccelerator anderson;
+	anderson.init(NumNodes, 5);
 
 do{
 
@@ -734,20 +741,24 @@ do{
             y+=(L.V[j]*L.V[j]);
         }
 
-        if (y==0) { LinearFlag=TRUE; fprintf(stderr, "[fkn]   y==0, setting LinearFlag=TRUE\n"); }
+        if (y==0) { LinearFlag=TRUE; fprintf(stderr, "[fkn]   y==0, setting LinearFlag=TRUE\n"); TheView->LogMessage("y==0, setting LinearFlag=TRUE"); }
         else{
             lastres=res;
             res=sqrt(x/y);
         }
 
 
-        // relaxation if we need it
-        if(Iter>5)
+        // Anderson acceleration with relaxation fallback
+        if(Iter>=1)
         {
-            if ((res>lastres) && (Relax>0.125)) Relax/=2.;
-            else Relax+= 0.1 * (1. - Relax);
-       
-            for(j=0;j<NumNodes;j++) L.V[j]=Relax*L.V[j]+(1.0-Relax)*V_old[j];
+            if (!anderson.apply(V_old, L.V)) {
+                // Anderson rejected — fall back to adaptive relaxation
+                if(Iter>5) {
+                    if ((res>lastres) && (Relax>0.125)) Relax/=2.;
+                    else Relax+= 0.1 * (1. - Relax);
+                    for(j=0;j<NumNodes;j++) L.V[j]=Relax*L.V[j]+(1.0-Relax)*V_old[j];
+                }
+            }
         }
 
        
@@ -775,22 +786,29 @@ do{
 			stallCount++;
 		}
 		if (stallCount >= 10) {
-			fprintf(stderr, "[fkn]   Newton: stalled at iter %d, res=%g (best=%g, threshold=%g). Accepting.\n",
+			snprintf(logbuf, sizeof(logbuf), "Newton: stalled at iter %d, res=%g (best=%g, threshold=%g). Accepting.",
 				Iter, res, bestRes, 1000.*Precision);
+			fprintf(stderr, "[fkn]   %s\n", logbuf);
+			TheView->LogMessage(logbuf);
 			LinearFlag = TRUE;
 		}
 	}
 
 	// Hard cap as ultimate safety net.
 	if(!LinearFlag && Iter >= MaxNewtonIters) {
-		fprintf(stderr, "[fkn]   Newton: max iterations (%d) reached, res=%g. Accepting.\n",
+		snprintf(logbuf, sizeof(logbuf), "Newton: max iterations (%d) reached, res=%g. Accepting.",
 			MaxNewtonIters, res);
+		fprintf(stderr, "[fkn]   %s\n", logbuf);
+		TheView->LogMessage(logbuf);
 		LinearFlag = TRUE;
 	}
 
-	if (Iter < 5 || Iter % 50 == 0 || LinearFlag)
-		fprintf(stderr, "[fkn]   Newton iter %d: res=%g, Relax=%g\n",
+	if (Iter < 5 || Iter % 50 == 0 || LinearFlag) {
+		snprintf(logbuf, sizeof(logbuf), "Newton iter %d: res=%g, Relax=%g",
 			Iter, res, Relax);
+		fprintf(stderr, "[fkn]   %s\n", logbuf);
+		TheView->LogMessage(logbuf);
+	}
 
 	Iter++;
 

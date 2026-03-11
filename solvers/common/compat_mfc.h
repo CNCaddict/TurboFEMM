@@ -33,9 +33,17 @@ public:
     void* m_hWnd = (void*)1;  // always "valid"
 
     std::function<void(int, const char*)> onStatusText;
+    std::function<void(const char*)> onLogMessage;
 
     void SetDlgItemText(int id, const char* text) {
         if (onStatusText) { onStatusText(id, text); return; }
+        if (text && text[0]) {
+            fprintf(stderr, "%s\n", text);
+        }
+    }
+
+    void LogMessage(const char* text) {
+        if (onLogMessage) { onLogMessage(text); return; }
         if (text && text[0]) {
             fprintf(stderr, "%s\n", text);
         }
