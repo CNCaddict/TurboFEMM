@@ -2,7 +2,7 @@
 
 A modernized, GPU-accelerated port of [FEMM 4.2](http://www.femm.info/) (Finite Element Method Magnetics) by David Meeker. Rebuilt with Qt6 for macOS, with major new features including parametric motion analysis, adaptive mesh refinement, and Metal GPU-accelerated solving.
 
-> **Note:** This is an experimental "vibe-coded" project. There are almost certainly bugs and accuracy issues. Use at your own risk and always validate results against known solutions.
+> **⚠️ Warning:** This is an experimental, "vibe-coded" project — built rapidly with AI assistance and only lightly tested. **Do not trust the results** for anything critical. There are almost certainly bugs, numerical inaccuracies, and edge cases that have not been caught. Always validate against known analytical solutions or the original FEMM 4.2 before relying on any output.
 
 ![TurboFEMM Screenshot](https://github.com/CNCaddict/TurboFEMM/releases/download/v0.1.0-alpha/turbofemm-screenshot.png)
 
