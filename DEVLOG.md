@@ -6,6 +6,136 @@
 
 ---
 
+## Session 2026-03-10 — UX Polish, Density Plot, Motion Dialog, GitHub Setup
+
+**Scope:** Six fixes/features focused on UI polish, rendering quality, motion system rework, and getting the project onto GitHub.
+
+### 1. Window Resize Bug During Analysis
+
+**Problem:** The main window visibly resized during every solver iteration — looked unprofessional. The status bar was growing/shrinking as solver text changed.
+
+**Root cause (two issues):**
+1. QStatusBar had no fixed height constraint, so layout recalculated on every text change
+2. Solver stdout/stderr could emit multiple lines at once (e.g. `readAllStandardOutput()` returns batched output), expanding the status label vertically
+
+**Solution:**
+- Locked status bar height after initial layout: `statusBar()->setFixedHeight(statusBar()->sizeHint().height())`
+- Disabled size grip: `statusBar()->setSizeGripEnabled(false)`
+- Changed `updateStatus()` to extract only the last line of multiline text and trim it
+
+**Files modified:**
+- `gui/mainwindow.cpp` — `createStatusBar()` (height lock), `updateStatus()` (last-line extraction)
+
+**Gotcha:** The fix must call `setFixedHeight()` *after* the status bar has its initial content, so `sizeHint()` returns a reasonable value.
+
+---
+
+### 2. Auto-Open Last File on Launch
+
+**Problem:** User had to manually open the same file every time they launched the app.
+
+**Solution:** Save the file path in QSettings on every `openFile()` call, restore it in `main.cpp` on startup if no command-line argument was given.
+
+**Files modified:**
+- `gui/mainwindow.cpp` — Added `QSettings` save in `openFile()` before creating DrawingWidget
+- `gui/main.cpp` — Added startup logic: check `file/lastOpenedFile` in QSettings, open if file exists
+
+**Key design decisions:**
+- Only auto-opens if no CLI argument provided (CLI takes priority)
+- Checks `QFileInfo::exists()` before opening — gracefully handles deleted files
+
+---
+
+### 3. Smooth Density Plot (Gouraud Shading)
+
+**Problem:** Density plot showed visible banding/lines — only 20 discrete color levels with flat shading per triangle, plus a complex multi-color subdivision algorithm that still looked blocky.
+
+**Solution:** Complete rewrite of the density rendering pipeline:
+1. **256-color procedural palette** — Replaced hardcoded 20-color `s_colorMap` static array with procedurally generated smooth gradient (magenta → yellow → cyan) via `paletteColor()` static method
+2. **Per-pixel Gouraud shading** — Replaced flat `rasterTriangle()` + multi-color subdivision with `rasterTriangleGouraud()` that interpolates values at every pixel using barycentric coordinates, then looks up color from 256-entry LUT
+
+**Files modified:**
+- `gui/resultsoverlay.h` — `kNumColors = 256`, removed static color array, added `paletteColor()` method
+- `gui/resultsoverlay.cpp` — New Gouraud rasterizer (scanline with per-pixel interpolation), procedural palette generation, smooth gradient legend with 7 value labels
+
+**Key design decisions:**
+- Scanline rasterizer sorts vertices by Y, walks left/right edges, interpolates value linearly across each scanline
+- LUT approach (compute palette once, index per pixel) is much faster than per-pixel HSV conversion
+- Legend draws 256 thin horizontal bands for smooth gradient, with 7 evenly-spaced numeric labels
+- All line rasterizers (Bresenham, Wu's AA, SSAA) left unchanged
+
+---
+
+### 4. Translation Motion Rework + Linear Motor Support
+
+**Problem:** Rotation mode had a clean "total angle + steps" parameterization, but translation used raw per-step dx/dy — inconsistent and confusing. Also, linear motors had no way to map displacement to electrical angle for 3-phase current computation.
+
+**Solution:** Two changes:
+1. **New translation UI:** "Total distance" (mm) + "Direction angle" (degrees, 0=+X), matching rotation's "Total angle" + steps paradigm. Per-step dx/dy computed automatically: `stepDist × cos/sin(directionAngle)`
+2. **Pole pitch for linear motors:** New "Pole Pitch (translation)" field in motor section. Electrical angle = `(cumulative_displacement / polePitch) × 360°`, analogous to rotation's `mechAngle × polePairs`
+
+**Files modified:**
+- `gui/dialogs/motiondialog.h` — MotionConfig: added `totalDistance`, `directionAngle`, `motorPolePitch`; `dx`/`dy` now computed
+- `gui/dialogs/motiondialog.cpp` — New translation page UI, pole pitch spinbox, config() computes dx/dy from distance+angle
+- `gui/motionrunner.cpp` — Motor electrical angle: rotation branch uses `polePairs`, translation branch uses `polePitch`
+
+**Key design decisions:**
+- `dx`/`dy` kept in MotionConfig as computed values (not removed) so downstream code (solver, geometry transforms) doesn't need changes
+- Pole pitch default = 10.0 mm, range 0.001–1e6 mm
+- Division-by-zero guard: `if (polePitch < 1e-12) polePitch = 1e-12`
+
+---
+
+### 5. Remove Unnecessary Post-Sweep Auto-Solve
+
+**Problem:** After motion sweep completed and geometry was restored, `onMotionFinished()` was running the solver one more time on the restored (original) geometry — pointless and confusing.
+
+**Solution:** Removed the `m_solver->runSolver(doc)` call in `onMotionFinished()`. Now just shows completion message and updates status.
+
+**Files modified:**
+- `gui/mainwindow.cpp` — Removed auto-solve block in `onMotionFinished()`
+
+---
+
+### 6. Git Repository + GitHub Setup
+
+**Problem:** User wanted the project on GitHub but the working folder was ~100MB due to `build/` directory.
+
+**Solution:**
+1. Created `.gitignore` excluding: `build/`, `CMakeFiles/`, `.DS_Store`, IDE files, solver output (`*.ans`, `*.node`, `*.ele`, `*.edge`, `*.pbc`, `*.poly`), `.app` bundles, `.claude/`
+2. Initialized git repo, staged 810 files (~26 MB after exclusions)
+3. Initial commit: `TurboFEMM: Qt6 port of FEMM 4.2 with modern features`
+4. Authenticated via `gh auth login` (browser-based OAuth)
+5. Pushed to `github.com/CNCaddict/TurboFEMM`
+
+**Files created:**
+- `.gitignore`
+
+**Gotchas:**
+- `CMakeFiles/CMakeSystem.cmake` existed in source root (outside `build/`) — had to `git rm --cached` it
+- `gh auth login` doesn't work well through non-interactive terminals — user had to run it in their own Terminal.app
+- GitHub disabled password auth for git operations — must use `gh` CLI, SSH key, or personal access token
+
+---
+
+### Summary of all files touched this session
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `gui/mainwindow.cpp` | Modified | Status bar height lock, updateStatus last-line fix, last-file save, remove post-sweep solve |
+| `gui/main.cpp` | Modified | Auto-open last file on launch |
+| `gui/resultsoverlay.h` | Modified | 256-color palette, Gouraud shading API |
+| `gui/resultsoverlay.cpp` | Modified | Gouraud rasterizer, procedural palette, smooth legend |
+| `gui/dialogs/motiondialog.h` | Modified | totalDistance, directionAngle, motorPolePitch |
+| `gui/dialogs/motiondialog.cpp` | Modified | Translation UI rework, pole pitch spinbox |
+| `gui/motionrunner.cpp` | Modified | Linear motor electrical angle from pole pitch |
+| `.gitignore` | **Created** | Exclude build artifacts, IDE files, solver output |
+
+### Tests
+All 76 tests passing after all changes (26 mesh + 8 solver + 42 other).
+
+---
+
 ## Session 2026-03-11 — Anderson Acceleration, Log Panel, GitHub Release, README
 
 **Scope:** Four major features plus project packaging and documentation.
