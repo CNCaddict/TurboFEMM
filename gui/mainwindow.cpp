@@ -56,7 +56,7 @@ protected:
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle(tr("FEMM 4.2"));
+    setWindowTitle(tr("TurboFEMM"));
     resize(1200, 800);
 
     // Central MDI area + log panel in a vertical splitter

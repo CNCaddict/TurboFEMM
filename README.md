@@ -16,9 +16,9 @@ The original FEMM 4.2 is a Windows-only, single-threaded, CPU-based magnetostati
 The original FEMM can only analyze a single static geometry. TurboFEMM adds a full motion sweep engine:
 - **Translation sweeps** — move geometry along any direction, solve at each step
 - **Rotation sweeps** — rotate around any center point with configurable angle steps
+- **Automatic re-meshing** — generates a fresh mesh at each position after geometry transforms
 - **Automatic animation** — exports GIF animations and individual PNG frames
 - **CSV data export** — flux density, energy, force, and torque at every step
-- **Mesh persistence** — reuses refined mesh across steps (no re-meshing overhead)
 
 ### 3-Phase Motor Analysis
 - Computes instantaneous Phase A/B/C currents from electrical angle and RMS current
@@ -63,11 +63,6 @@ The original FEMM can only analyze a single static geometry. TurboFEMM adds a fu
 - Point queries for field values at arbitrary locations
 - Torque computation via Maxwell stress tensor
 
-### DXF Import
-- Reads DXF R12 ASCII files (POINT, LINE, ARC, CIRCLE, LWPOLYLINE, POLYLINE)
-- Auto-splits arcs > 180 degrees
-- Configurable merge tolerance for near-coincident nodes
-
 ### Automated Test Suite
 - Qt Test framework with 76 tests covering document I/O, geometry, mesh generation, and solver integration
 - Benchmark suite for performance tracking
@@ -86,7 +81,7 @@ The original FEMM can only analyze a single static geometry. TurboFEMM adds a fu
 | Adaptive mesh refinement | No | Yes (2-phase ZZ + coarsening) |
 | GPU acceleration | No | Yes (Apple Metal) |
 | Nonlinear acceleration | Basic relaxation | Anderson acceleration (2-3x faster) |
-| DXF import | No | Yes |
+| DXF import | Yes | Yes (inherited from original) |
 | In-process solver | No (disk-based IPC) | Yes (in-memory) |
 | Anti-aliased rendering | No | Yes (multi-level SSAA) |
 | Solver log panel | No | Yes (scrollable, timestamped) |
