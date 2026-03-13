@@ -81,13 +81,13 @@ AdaptiveDialog::AdaptiveDialog(QWidget *parent)
     tolLayout->addWidget(tolLabel);
 
     m_toleranceSpinBox = new QDoubleSpinBox;
-    m_toleranceSpinBox->setRange(0.10, 10.00);
+    m_toleranceSpinBox->setRange(0.10, 20.00);
     m_toleranceSpinBox->setDecimals(2);
     m_toleranceSpinBox->setSuffix(tr(" %"));
     m_toleranceSpinBox->setSingleStep(0.25);
     m_toleranceSpinBox->setToolTip(
         tr("Type an exact ZZ error tolerance percentage.\n\n"
-           "Range: 0.10% (very fine) to 10.00% (very coarse).\n"
+           "Range: 0.10% (very fine) to 20.00% (very coarse).\n"
            "The slider and this box stay in sync."));
     tolLayout->addWidget(m_toleranceSpinBox);
 
@@ -131,22 +131,22 @@ AdaptiveDialog::AdaptiveDialog(QWidget *parent)
     onSliderChanged(m_precisionSlider->value());
 }
 
-// --- Slider ↔ tolerance mapping (log scale: 10% at 0, 0.1% at 100) ---
-// tolerance = 0.10 * exp(-t * ln(100))   where t = slider / 100
-// At slider=0:   0.10 * exp(0) = 0.10 (10%)
-// At slider=100: 0.10 * exp(-ln(100)) = 0.001 (0.1%)
+// --- Slider ↔ tolerance mapping (log scale: 20% at 0, 0.1% at 100) ---
+// tolerance = 0.20 * exp(-t * ln(200))   where t = slider / 100
+// At slider=0:   0.20 * exp(0) = 0.20 (20%)
+// At slider=100: 0.20 * exp(-ln(200)) = 0.001 (0.1%)
 
 double AdaptiveDialog::sliderToTolerance(int value) const
 {
     double t = value / 100.0;
-    return 0.10 * std::exp(-t * std::log(100.0));
+    return 0.20 * std::exp(-t * std::log(200.0));
 }
 
 int AdaptiveDialog::toleranceToSlider(double tolerance) const
 {
-    // Inverse: t = ln(0.10 / tolerance) / ln(100)
-    tolerance = std::clamp(tolerance, 0.001, 0.10);
-    double t = std::log(0.10 / tolerance) / std::log(100.0);
+    // Inverse: t = ln(0.20 / tolerance) / ln(200)
+    tolerance = std::clamp(tolerance, 0.001, 0.20);
+    double t = std::log(0.20 / tolerance) / std::log(200.0);
     return std::clamp(static_cast<int>(std::round(t * 100.0)), 0, 100);
 }
 
@@ -203,7 +203,7 @@ AdaptiveConfig AdaptiveDialog::config() const
     // Read directly from spinbox for maximum precision
     cfg.tolerance = m_toleranceSpinBox->value() / 100.0;
     cfg.maxIterations = m_maxIterations->value();
-    cfg.markingFraction = 0.30;
+    cfg.markingFraction = 0.20;
 
     return cfg;
 }

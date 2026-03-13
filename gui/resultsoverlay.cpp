@@ -295,6 +295,14 @@ QColor ResultsOverlayRenderer::colorForLevel(int level) const
 
 double ResultsOverlayRenderer::getVertexValue(const SolnElement &elm, int vertex) const
 {
+    if (m_densityType == DensityType::IronLoss) {
+        // Iron loss: use per-element value (constant across element, no smoothing)
+        // Find the element index by scanning — this is called per-vertex but the
+        // value is constant per element.  The elm reference lets us compute the index.
+        // We use the element's centroid to look up from ironLoss_Wkg if available.
+        return m_cachedIronLoss;  // set by rasterElement caller
+    }
+
     CmplxF b1, b2;
     if (m_doc->smoothB) { b1 = elm.b1[vertex]; b2 = elm.b2[vertex]; }
     else                { b1 = elm.B1;          b2 = elm.B2;          }
@@ -437,7 +445,26 @@ void ResultsOverlayRenderer::rasterElement(int elmIdx)
                    - (sp2.x()-sp0.x())*(sp1.y()-sp0.y());
     if (std::fabs(crossZ) < 0.5) return;
 
-    double bl = m_doc->B_Low, bh = m_doc->B_High;
+    // Select bounds based on density type
+    double bl, bh;
+    if (m_densityType == DensityType::IronLoss) {
+        bl = m_doc->ironLoss_Low;
+        bh = m_doc->ironLoss_High;
+        // Set cached iron loss for getVertexValue()
+        if (elmIdx >= 0 && elmIdx < (int)m_doc->ironLoss_Wkg.size())
+            m_cachedIronLoss = m_doc->ironLoss_Wkg[elmIdx];
+        else
+            m_cachedIronLoss = 0.0;
+    } else {
+        bl = m_doc->B_Low;
+        bh = m_doc->B_High;
+    }
+
+    // Override with manual scale if set
+    if (!m_autoScale) {
+        bl = m_scaleMin;
+        bh = m_scaleMax;
+    }
     if (std::fabs(bh - bl) < 1e-30) bh = bl + 1.0;
     double scale = (double)(kNumColors - 1) / (bh - bl);
 
@@ -599,11 +626,25 @@ void ResultsOverlayRenderer::drawLegend(QPainter &p, int w, int /*h*/)
     case DensityType::B_imag: title = "|Im(B)| (T)"; break;
     case DensityType::H_mag:  title = "|H| (A/m)"; break;
     case DensityType::J_mag:  title = "|J| (A/m\u00b2)"; break;
+    case DensityType::IronLoss: title = "Iron Loss (W/kg)"; break;
     default: title = ""; break;
     }
     p.drawText(x0, y0, legendW + textW, 15, Qt::AlignCenter, title);
 
-    double bl = m_doc->B_Low, bh = m_doc->B_High;
+    double bl, bh;
+    if (m_densityType == DensityType::IronLoss) {
+        bl = m_doc->ironLoss_Low;
+        bh = m_doc->ironLoss_High;
+    } else {
+        bl = m_doc->B_Low;
+        bh = m_doc->B_High;
+    }
+
+    // Override with manual scale if set
+    if (!m_autoScale) {
+        bl = m_scaleMin;
+        bh = m_scaleMax;
+    }
     f.setPointSize(7);
     p.setFont(f);
 
@@ -631,4 +672,52 @@ void ResultsOverlayRenderer::drawLegend(QPainter &p, int w, int /*h*/)
                    Qt::AlignVCenter | Qt::AlignLeft,
                    QString::number(val, 'e', 2));
     }
+}
+
+// Compute percentile-based bounds from current density data
+std::pair<double, double> ResultsOverlayRenderer::computePercentileBounds(double percentile) const
+{
+    if (!m_doc || m_doc->elements.empty()) return {0.0, 1.0};
+
+    std::vector<double> values;
+    int numElm = (int)m_doc->elements.size();
+
+    if (m_densityType == DensityType::IronLoss) {
+        values.reserve(m_doc->ironLoss_Wkg.size());
+        for (int i = 0; i < numElm && i < (int)m_doc->ironLoss_Wkg.size(); i++) {
+            if (m_doc->ironLoss_Wkg[i] > 0)
+                values.push_back(m_doc->ironLoss_Wkg[i]);
+        }
+    } else {
+        // For B/H/J types, collect from element-average B
+        values.reserve(numElm);
+        for (int i = 0; i < numElm; i++) {
+            const auto &elm = m_doc->elements[i];
+            double v = 0;
+            switch (m_densityType) {
+            case DensityType::B_mag:
+                v = std::sqrt(std::norm(elm.B1) + std::norm(elm.B2));
+                break;
+            case DensityType::B_real:
+                v = std::sqrt(elm.B1.real() * elm.B1.real() +
+                              elm.B2.real() * elm.B2.real());
+                break;
+            case DensityType::B_imag:
+                v = std::sqrt(elm.B1.imag() * elm.B1.imag() +
+                              elm.B2.imag() * elm.B2.imag());
+                break;
+            default: break;
+            }
+            if (v > 0) values.push_back(v);
+        }
+    }
+
+    if (values.empty()) return {0.0, 1.0};
+
+    std::sort(values.begin(), values.end());
+    double lo = 0.0;
+    int hiIdx = std::min((int)(percentile * values.size()), (int)values.size() - 1);
+    double hi = values[hiIdx];
+    if (hi <= lo) hi = lo + 1.0;
+    return {lo, hi};
 }

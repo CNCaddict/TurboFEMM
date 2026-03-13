@@ -33,6 +33,10 @@ CircuitDialog::CircuitDialog(FemmeDocument *doc, FCircuit *circ,
     m_amps_re->setDecimals(6);
     m_amps_re->setSuffix(tr(" A"));
     m_amps_re->setValue(circ->amps.re);
+    m_amps_re->setToolTip(tr("Real part of the circuit current in amperes.\n"
+                              "For DC problems, this is the total current.\n"
+                              "For the motor module, this is set automatically\n"
+                              "by the commutation algorithm during motion sweeps."));
     formLayout->addRow(tr("Current (real):"), m_amps_re);
 
     m_amps_im = new QDoubleSpinBox;
@@ -40,12 +44,20 @@ CircuitDialog::CircuitDialog(FemmeDocument *doc, FCircuit *circ,
     m_amps_im->setDecimals(6);
     m_amps_im->setSuffix(tr(" A"));
     m_amps_im->setValue(circ->amps.im);
+    m_amps_im->setToolTip(tr("Imaginary part of the circuit current.\n"
+                              "Non-zero for AC problems with phase-shifted excitation.\n"
+                              "For DC magnetostatic problems, leave at 0."));
     formLayout->addRow(tr("Current (imag):"), m_amps_im);
 
     m_circType = new QComboBox;
     m_circType->addItem(tr("Parallel"));
     m_circType->addItem(tr("Series"));
     m_circType->setCurrentIndex(circ->circType);
+    m_circType->setToolTip(tr("Series: all turns in this circuit carry the same current.\n"
+                               "  Total MMF = current * turns (set on block labels).\n"
+                               "  Use for motor windings with known phase current.\n"
+                               "Parallel: current divides equally among turns.\n"
+                               "  Each conductor carries current / N_turns."));
     formLayout->addRow(tr("Circuit type:"), m_circType);
 
     mainLayout->addLayout(formLayout);

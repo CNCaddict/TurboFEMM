@@ -708,7 +708,7 @@ ResultsSummary ResultsDocument::computeSummary() const
             if (matIdx >= 0 && matIdx < (int)materials.size())
                 mu_r = std::max(1e-6, 0.5 * (materials[matIdx].mu_x + materials[matIdx].mu_y));
         }
-        double w = 0.5 * (bMag * bMag) / (mu0 * mu_r) * areaM2 * depth;
+        double w = 0.5 * (bMag * bMag) / (mu0 * mu_r) * areaM2 * (depth * L);
         s.totalEnergy += w;
         s.totalArea += areaM2;
     }
@@ -786,8 +786,8 @@ double ResultsDocument::computeTorque(double aboutX, double aboutY,
         // Torque about (aboutX, aboutY)
         double torqueContrib = (xc - aboutXm) * F2 - (yc - aboutYm) * F1;
 
-        // Element area in m² × depth (planar)
-        double area = std::fabs(da) * 0.5 * L * L * depth;
+        // Element volume: area (m²) × depth (m)
+        double area = std::fabs(da) * 0.5 * L * L * (depth * L);
 
         totalTorque += area * torqueContrib;
     }

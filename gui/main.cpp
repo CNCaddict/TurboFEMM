@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("FEMM");
-    app.setApplicationVersion("4.2");
+    app.setApplicationVersion("4.3.0");
     app.setOrganizationName("FEMM");
 
     MainWindow w;

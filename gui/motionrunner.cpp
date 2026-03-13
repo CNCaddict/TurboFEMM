@@ -8,6 +8,7 @@
 #include "resultsoverlay.h"
 #include "resultsdoc.h"
 #include "motoroptimizer.h"
+#include "ironloss.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -15,6 +16,7 @@
 #include <QBuffer>
 #include <QDir>
 #include <QPixmap>
+#include <QPainter>
 #include <QApplication>
 #include <QThread>
 #include <QTimer>
@@ -328,6 +330,15 @@ MotionRunner::~MotionRunner()
     }
     delete m_pendingResults;
     m_pendingResults = nullptr;
+    delete m_lastResultsDoc;
+    m_lastResultsDoc = nullptr;
+}
+
+ResultsDocument *MotionRunner::takeLastResults()
+{
+    ResultsDocument *doc = m_lastResultsDoc;
+    m_lastResultsDoc = nullptr;
+    return doc;
 }
 
 void MotionRunner::start(const MotionConfig &config,
@@ -349,6 +360,7 @@ void MotionRunner::start(const MotionConfig &config,
     m_aborting = false;
     m_currentStep = 0;
     m_results.clear();
+    m_bHistory.clear();
     m_frames.clear();
     m_timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
 
@@ -404,6 +416,42 @@ void MotionRunner::start(const MotionConfig &config,
     m_solverConn = connect(m_solver, &SolverRunner::finished,
                            this, &MotionRunner::onSolverFinished);
 
+    // Motor diagnostic dump at sweep start
+    if (m_config.motorEnabled) {
+        emit progress(tr("=== Motor Config ==="));
+        emit progress(tr("  optimalAngle = %1°").arg(m_config.motorOptimalAngle, 0, 'f', 2));
+        emit progress(tr("  polePairs = %1").arg(m_config.motorPolePairs));
+        emit progress(tr("  rmsCurrent = %1 A").arg(m_config.motorRmsCurrent, 0, 'f', 3));
+        emit progress(tr("  stepAngle = %1° mech").arg(m_config.angle, 0, 'f', 3));
+        emit progress(tr("  numSteps = %1").arg(m_config.numSteps));
+        emit progress(tr("  reversePhase = %1").arg(m_config.motorReversePhase ? "true" : "false"));
+        emit progress(tr("  rotationCenter = (%1, %2)")
+            .arg(m_config.cx, 0, 'f', 3).arg(m_config.cy, 0, 'f', 3));
+        emit progress(tr("  phaseA=%1  phaseB=%2  phaseC=%3")
+            .arg(m_config.motorPhaseA, m_config.motorPhaseB, m_config.motorPhaseC));
+        emit progress(tr("  group = %1").arg(m_config.groupNumber));
+        // Dump circuit properties
+        for (int ci = 0; ci < (int)doc->circuitProps.size(); ci++) {
+            emit progress(tr("  Circuit[%1] '%2': amps=(%3, %4) type=%5")
+                .arg(ci).arg(doc->circuitProps[ci].circName)
+                .arg(doc->circuitProps[ci].amps.re, 0, 'f', 4)
+                .arg(doc->circuitProps[ci].amps.im, 0, 'f', 4)
+                .arg(doc->circuitProps[ci].circType));
+        }
+        // Dump winding slot block labels (those with non-zero circuit)
+        for (int bi = 0; bi < (int)doc->blockLabels.size(); bi++) {
+            const auto &bl = doc->blockLabels[bi];
+            if (bl.inCircuit != "<None>" && bl.turns != 0) {
+                double ang = std::atan2(bl.y, bl.x) * 180.0 / M_PI;
+                if (ang < 0) ang += 360.0;
+                emit progress(tr("  Slot[%1] (%2,%3) angle=%4° circuit='%5' turns=%6 group=%7")
+                    .arg(bi).arg(bl.x, 0, 'f', 1).arg(bl.y, 0, 'f', 1)
+                    .arg(ang, 0, 'f', 1).arg(bl.inCircuit).arg(bl.turns).arg(bl.inGroup));
+            }
+        }
+        emit progress(tr("=== End Motor Config ==="));
+    }
+
     // Run step 0 (initial position — no transform, just solve)
     runNextStep();
 }
@@ -428,6 +476,7 @@ void MotionRunner::abort()
     m_running = false;
     m_frames.clear();
     m_deferredPNGs.clear();
+    m_bHistory.clear();
     delete m_pendingResults;
     m_pendingResults = nullptr;
     emit progress(tr("Motion sweep aborted."));
@@ -461,28 +510,46 @@ void MotionRunner::runNextStep()
 
     // Apply motor 3-phase currents if motor module is enabled
     if (m_config.motorEnabled) {
-        double sign = m_config.motorReversePhase ? 1.0 : -1.0;
+        double sign = m_config.motorReversePhase ? -1.0 : 1.0;
         double elecAngle;
         if (m_config.isRotation) {
-            // Rotary motor: electrical angle = mechanical angle × pole pairs
+            // Rotary motor: electrical angle tracks rotor position.
+            // As the rotor advances, the stator electrical angle must
+            // track to maintain the optimal torque-producing relative
+            // angle.  The sign depends on the relationship between
+            // rotor mechanical advance and stator field direction.
             double cumMechAngle = m_config.angle * (double)m_currentStep;
             elecAngle = m_config.motorOptimalAngle
-                      + sign * cumMechAngle * (double)m_config.motorPolePairs;
+                      - sign * cumMechAngle * (double)m_config.motorPolePairs;
         } else {
-            // Linear motor: electrical angle = displacement / pole pitch × 360°
+            // Linear motor: same sign convention
             double stepDist = std::sqrt(m_config.dx * m_config.dx
                                        + m_config.dy * m_config.dy);
             double cumDist = stepDist * (double)m_currentStep;
             double polePitch = m_config.motorPolePitch;
             if (polePitch < 1e-12) polePitch = 1e-12;
             elecAngle = m_config.motorOptimalAngle
-                      + sign * (cumDist / polePitch) * 360.0;
+                      - sign * (cumDist / polePitch) * 360.0;
         }
         auto currents = MotorOptimizer::computeCurrents(
             m_config.motorRmsCurrent, elecAngle);
         MotorOptimizer::applyCurrents(
             m_doc, currents,
             m_config.motorPhaseA, m_config.motorPhaseB, m_config.motorPhaseC);
+
+        // Cache for StepResult after solve completes
+        m_stepElecAngle = elecAngle;
+        m_stepIa = currents.Ia;
+        m_stepIb = currents.Ib;
+        m_stepIc = currents.Ic;
+
+        // Log ALL steps for debugging motor commutation
+        emit progress(tr("  Step %1: elecAngle=%2° Ia=%3 Ib=%4 Ic=%5")
+            .arg(m_currentStep)
+            .arg(elecAngle, 0, 'f', 1)
+            .arg(currents.Ia, 0, 'f', 3)
+            .arg(currents.Ib, 0, 'f', 3)
+            .arg(currents.Ic, 0, 'f', 3));
     }
 
     // In-process solve in a worker thread (keeps UI responsive)
@@ -554,6 +621,10 @@ void MotionRunner::onInProcessSolveFinished()
         sr.cumAngle = 0.0;
     }
     sr.summary = summary;
+    sr.elecAngleDeg = m_stepElecAngle;
+    sr.Ia = m_stepIa;
+    sr.Ib = m_stepIb;
+    sr.Ic = m_stepIc;
 
     // Maxwell stress tensor torque (motor + rotation mode)
     if (m_config.motorEnabled && m_config.isRotation && m_config.csvForceTorque) {
@@ -563,6 +634,103 @@ void MotionRunner::onInProcessSolveFinished()
     }
 
     m_results.push_back(sr);
+
+    // Detailed per-step diagnostic for motor debugging
+    if (m_config.motorEnabled) {
+        // On first step, dump torque-relevant parameters
+        if (m_currentStep == 0 && rdoc) {
+            emit progress(tr("  [TorqueDiag] depth=%1, lengthConv=%2, depth_m=%3")
+                .arg(rdoc->depth, 0, 'f', 4)
+                .arg(rdoc->lengthConv, 0, 'e', 4)
+                .arg(rdoc->depth * rdoc->lengthConv, 0, 'f', 6));
+            // Count boundary elements and sample B values
+            int boundaryElms = 0;
+            double maxB = 0;
+            for (size_t e = 0; e < rdoc->elements.size(); e++) {
+                double Bx = rdoc->elements[e].B1.real();
+                double By = rdoc->elements[e].B2.real();
+                double Bmag = std::sqrt(Bx*Bx + By*By);
+                if (Bmag > maxB) maxB = Bmag;
+            }
+            emit progress(tr("  [TorqueDiag] numElements=%1, maxB=%2 T, group=%3, center=(%4,%5)")
+                .arg(rdoc->elements.size())
+                .arg(maxB, 0, 'f', 4)
+                .arg(m_config.groupNumber)
+                .arg(m_config.cx, 0, 'f', 3)
+                .arg(m_config.cy, 0, 'f', 3));
+        }
+        QString diag = tr("  → Step %1: E=%2 J")
+            .arg(m_currentStep - 0)  // step just solved (m_currentStep hasn't incremented yet)
+            .arg(summary.totalEnergy, 0, 'f', 6);
+        if (sr.hasTorque)
+            diag += tr(", MSTorque=%1 Nm").arg(sr.instantTorque, 0, 'f', 6);
+        // Energy-difference torque (compare with MST)
+        if (m_results.size() >= 2) {
+            double dTheta_mech = m_config.angle * M_PI / 180.0;
+            int n = (int)m_results.size();
+            double dE = m_results[n-1].summary.totalEnergy - m_results[n-2].summary.totalEnergy;
+            double vwTorque = -dE / dTheta_mech;
+            diag += tr(", VW_dE=%1, VWTorque=%2 Nm").arg(dE, 0, 'f', 6).arg(vwTorque, 0, 'f', 6);
+        }
+        emit progress(diag);
+    }
+
+    // Capture B-field snapshot for iron loss computation
+    if (m_config.calculateLosses) {
+        BSnapshot snap;
+        int lossElmCount = 0;
+        for (int i = 0; i < (int)rdoc->elements.size(); i++) {
+            const auto &elm = rdoc->elements[i];
+            int lbl = elm.lbl;
+            if (lbl < 0 || lbl >= (int)rdoc->labels.size()) continue;
+            if (!rdoc->labels[lbl].calculateLosses) continue;
+            lossElmCount++;
+            // Compute Az at centroid as average of 3 nodal values
+            float azCentroid = 0.0f;
+            if (elm.p[0] >= 0 && elm.p[0] < (int)rdoc->nodes.size() &&
+                elm.p[1] >= 0 && elm.p[1] < (int)rdoc->nodes.size() &&
+                elm.p[2] >= 0 && elm.p[2] < (int)rdoc->nodes.size()) {
+                azCentroid = (float)((rdoc->nodes[elm.p[0]].A.real() +
+                                      rdoc->nodes[elm.p[1]].A.real() +
+                                      rdoc->nodes[elm.p[2]].A.real()) / 3.0);
+            }
+            snap.add((float)elm.cx, (float)elm.cy,
+                     (float)elm.B1.real(), (float)elm.B2.real(), azCentroid);
+        }
+        m_bHistory.push_back(std::move(snap));
+
+        // Diagnostic at first step
+        if (m_currentStep == 0) {
+            emit progress(tr("Iron loss: %1/%2 elements have calculateLosses enabled")
+                .arg(lossElmCount).arg(rdoc->elements.size()));
+            if (lossElmCount == 0) {
+                emit progress(tr("WARNING: No block labels have 'Calculate iron losses' enabled.\n"
+                                  "Enable it in Properties → Block Labels for iron/steel regions."));
+            }
+            int matWithLoss = 0;
+            int matConductiveNoDensity = 0;
+            for (int m = 0; m < (int)rdoc->materials.size(); m++) {
+                const auto &mat = rdoc->materials[m];
+                bool hasSteinmetz = (mat.Kh > 0 || mat.Kc > 0 || mat.Ke > 0);
+                bool hasConductivity = (mat.Cduct > 0);
+                if ((hasSteinmetz || hasConductivity) && mat.density > 0)
+                    matWithLoss++;
+                if (hasConductivity && mat.density <= 0)
+                    matConductiveNoDensity++;
+            }
+            emit progress(tr("Iron loss: %1/%2 materials have loss data + density")
+                .arg(matWithLoss).arg(rdoc->materials.size()));
+            if (matConductiveNoDensity > 0) {
+                emit progress(tr("WARNING: %1 conductive material(s) missing density — "
+                                  "eddy losses will be skipped. Set density in Material Properties.")
+                    .arg(matConductiveNoDensity));
+            }
+            if (matWithLoss == 0 && lossElmCount > 0) {
+                emit progress(tr("WARNING: No materials have loss data.\n"
+                                  "Set Kh/Kc/Ke + density (steel), or sigma + density (solid conductors)."));
+            }
+        }
+    }
 
     // Clear the cached frame so paintEvent does a live render
     if (m_dw)
@@ -582,6 +750,94 @@ void MotionRunner::onInProcessSolveFinished()
         // All steps complete
         disconnect(m_solverConn);
 
+        // Compute iron losses from B history if enabled
+        if (m_config.calculateLosses && !m_bHistory.empty() && m_overlay && m_overlay->document()) {
+            ResultsDocument *lastDoc = m_overlay->document();
+            double freq = m_config.operatingFreqHz;
+            // Auto-derive from RPM if freq not set but RPM is
+            if (freq <= 0 && m_config.motorRPM > 0 && m_config.motorPolePairs > 0)
+                freq = m_config.motorRPM * (double)m_config.motorPolePairs / 60.0;
+
+            if (freq > 0) {
+                emit progress(tr("Computing iron losses at %.1f Hz...").arg(freq));
+
+                // Build motion params for rotor-aware B(t) lookup
+                MotionParams motionParams;
+                motionParams.movingGroup = m_config.groupNumber;
+                motionParams.isRotation = m_config.isRotation;
+                motionParams.cx = m_config.cx;
+                motionParams.cy = m_config.cy;
+                motionParams.anglePerStep = m_config.angle;
+                motionParams.dx = m_config.dx;
+                motionParams.dy = m_config.dy;
+                motionParams.rpm = m_config.motorRPM;
+                motionParams.totalSteps = m_config.numSteps;
+
+                // depth is stored in original length units — convert to metres
+                double depthM = lastDoc->depth * lastDoc->lengthConv;
+                m_ironLossResult = computeIronLosses(
+                    m_bHistory, lastDoc, freq, depthM, motionParams);
+
+                // Populate per-element loss data on the ResultsDocument for heatmap
+                int numElm = (int)lastDoc->elements.size();
+                lastDoc->ironLoss_Wkg.resize(numElm, 0.0);
+                lastDoc->ironLoss_Low = 0.0;
+                lastDoc->ironLoss_High = 0.0;
+                for (int i = 0; i < numElm && i < (int)m_ironLossResult.elementLosses.size(); i++) {
+                    lastDoc->ironLoss_Wkg[i] = m_ironLossResult.elementLosses[i].loss_Wkg;
+                    if (lastDoc->ironLoss_Wkg[i] > lastDoc->ironLoss_High)
+                        lastDoc->ironLoss_High = lastDoc->ironLoss_Wkg[i];
+                }
+
+                // Report total loss
+                if (m_ironLossResult.valid) {
+                    emit progress(tr("Total iron loss: %1 W")
+                        .arg(m_ironLossResult.totalLoss_W, 0, 'f', 3));
+                    for (const auto &bs : m_ironLossResult.blockSummaries) {
+                        emit progress(tr("  Block %1 (%2): %3 W, avg %4 W/kg, peak B=%5 T")
+                            .arg(bs.blockIndex)
+                            .arg(bs.materialName)
+                            .arg(bs.totalLoss_W, 0, 'f', 3)
+                            .arg(bs.avgLoss_Wkg, 0, 'f', 2)
+                            .arg(bs.avgBpeak, 0, 'f', 3));
+                    }
+                }
+                // Capture iron loss heatmap to offscreen image
+                if (m_ironLossResult.valid && m_overlay && m_dw) {
+                    // Save and set overlay to iron loss mode
+                    DensityType prevDensity = m_overlay->densityType();
+                    bool prevLegend = m_overlay->showLegend();
+                    m_overlay->setShowDensity(DensityType::IronLoss);
+                    m_overlay->setShowLegend(true);
+
+                    // Render to offscreen QImage using the current view transform
+                    int w = m_dw->width();
+                    int h = m_dw->height();
+                    if (w > 0 && h > 0) {
+                        QImage offscreen(w, h, QImage::Format_ARGB32_Premultiplied);
+                        offscreen.fill(Qt::white);
+                        QPainter painter(&offscreen);
+                        painter.setRenderHint(QPainter::Antialiasing);
+                        m_overlay->render(painter, m_dw->viewOx(), m_dw->viewOy(),
+                                          m_dw->viewMag(), w, h);
+                        painter.end();
+
+                        QString heatmapPath = QString("%1/ironloss_%2.png")
+                            .arg(m_config.outputDir, m_timestamp);
+                        offscreen.save(heatmapPath, "PNG");
+                        emit progress(tr("Iron loss heatmap saved: %1").arg(heatmapPath));
+                    }
+
+                    // Restore previous overlay state
+                    m_overlay->setShowDensity(prevDensity);
+                    m_overlay->setShowLegend(prevLegend);
+                }
+            } else {
+                emit progress(tr("Iron loss skipped: operating frequency is 0 Hz.\n"
+                                  "Set RPM or frequency in the motion dialog."));
+            }
+        }
+
         if (m_config.saveCSV)
             writeCSV();
         if (m_config.saveVideo)
@@ -593,6 +849,16 @@ void MotionRunner::onInProcessSolveFinished()
             for (const auto &df : m_deferredPNGs)
                 df.pixmap.save(df.path, "PNG");
             m_deferredPNGs.clear();
+        }
+
+        // Save the last step's ResultsDocument (with iron loss data) so
+        // MainWindow can take ownership and display it as an overlay after
+        // the sweep.  Re-parent it away from MotionRunner so it survives.
+        delete m_lastResultsDoc;
+        m_lastResultsDoc = nullptr;
+        if (m_overlay && m_overlay->document()) {
+            m_lastResultsDoc = m_overlay->document();
+            m_lastResultsDoc->setParent(nullptr);  // detach from MotionRunner
         }
 
         // Clear overlay, cached frame, and unlock view before restoring
@@ -699,6 +965,28 @@ void MotionRunner::onSolverFinished(bool success)
 
     m_results.push_back(sr);
 
+    // Capture B-field snapshot for iron loss computation
+    if (m_config.calculateLosses) {
+        BSnapshot snap;
+        for (int i = 0; i < (int)rdoc->elements.size(); i++) {
+            const auto &elm = rdoc->elements[i];
+            int lbl = elm.lbl;
+            if (lbl < 0 || lbl >= (int)rdoc->labels.size()) continue;
+            if (!rdoc->labels[lbl].calculateLosses) continue;
+            float azCentroid = 0.0f;
+            if (elm.p[0] >= 0 && elm.p[0] < (int)rdoc->nodes.size() &&
+                elm.p[1] >= 0 && elm.p[1] < (int)rdoc->nodes.size() &&
+                elm.p[2] >= 0 && elm.p[2] < (int)rdoc->nodes.size()) {
+                azCentroid = (float)((rdoc->nodes[elm.p[0]].A.real() +
+                                      rdoc->nodes[elm.p[1]].A.real() +
+                                      rdoc->nodes[elm.p[2]].A.real()) / 3.0);
+            }
+            snap.add((float)elm.cx, (float)elm.cy,
+                     (float)elm.B1.real(), (float)elm.B2.real(), azCentroid);
+        }
+        m_bHistory.push_back(std::move(snap));
+    }
+
     // Clear the cached frame so paintEvent does a live render with the
     // new overlay + current geometry (which are now in sync for this step).
     if (m_dw)
@@ -798,8 +1086,11 @@ void MotionRunner::writeCSV()
     QTextStream out(&file);
 
     // --- Header (position columns always included) ---
+    // NOTE: column order must match data row order below
     QStringList hdr;
     hdr << "Step" << "Displacement_X" << "Displacement_Y" << "Angle_deg";
+    if (m_config.motorEnabled)
+        hdr << "ElecAngle_deg" << "Ia_A" << "Ib_A" << "Ic_A";
     if (m_config.csvFluxDensity)
         hdr << "B_max_T" << "B_min_T" << "B_avg_T";
     if (m_config.csvVectorPotential)
@@ -808,6 +1099,12 @@ void MotionRunner::writeCSV()
         hdr << "Energy_J" << "Area_m2";
     if (m_config.csvForceTorque)
         hdr << "Force_X_N" << "Force_Y_N" << "Torque_Nm";
+    if (m_config.csvIronLoss && m_ironLossResult.valid) {
+        hdr << "IronLoss_Total_W";
+        for (const auto &bs : m_ironLossResult.blockSummaries)
+            hdr << QString("IronLoss_%1_W").arg(bs.materialName.isEmpty()
+                    ? QString("Block%1").arg(bs.blockIndex) : bs.materialName);
+    }
     out << hdr.join(",") << "\n";
 
     // --- Pre-compute force/torque for all steps ---
@@ -879,6 +1176,12 @@ void MotionRunner::writeCSV()
             << QString::number(r.cumDy, 'e', 6)
             << QString::number(r.cumAngle, 'f', 4);
 
+        if (m_config.motorEnabled) {
+            row << QString::number(r.elecAngleDeg, 'f', 2)
+                << QString::number(r.Ia, 'f', 4)
+                << QString::number(r.Ib, 'f', 4)
+                << QString::number(r.Ic, 'f', 4);
+        }
         if (m_config.csvFluxDensity) {
             row << QString::number(r.summary.B_max, 'e', 6)
                 << QString::number(r.summary.B_min, 'e', 6)
@@ -900,6 +1203,12 @@ void MotionRunner::writeCSV()
             } else {
                 row << "" << "" << "";
             }
+        }
+
+        if (m_config.csvIronLoss && m_ironLossResult.valid) {
+            row << QString::number(m_ironLossResult.totalLoss_W, 'e', 6);
+            for (const auto &bs : m_ironLossResult.blockSummaries)
+                row << QString::number(bs.totalLoss_W, 'e', 6);
         }
 
         out << row.join(",") << "\n";

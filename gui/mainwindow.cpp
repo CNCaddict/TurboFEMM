@@ -92,7 +92,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Restore persistent view settings
     QSettings settings;
-    m_savedOverlayDensity = settings.value("view/overlayDensity", true).toBool();
+    m_savedDensityType = settings.value("view/densityType", (int)DensityType::B_mag).toInt();
     m_savedOverlayContours = settings.value("view/overlayContours", true).toBool();
     m_savedOverlayMesh = settings.value("view/overlayMesh", false).toBool();
     m_savedOverlayLegend = settings.value("view/overlayLegend", true).toBool();
@@ -207,12 +207,29 @@ void MainWindow::createMenus()
     // Overlay toggles
     viewMenu->addSeparator();
 
-    actOverlayDensity = viewMenu->addAction(tr("Overlay &Density Plot"));
-    actOverlayDensity->setCheckable(true);
-    actOverlayDensity->setChecked(false);
-    actOverlayDensity->setEnabled(false);
-    connect(actOverlayDensity, &QAction::toggled,
-            this, &MainWindow::onToggleOverlayDensity);
+    m_densityMenu = viewMenu->addMenu(tr("&Density Plot"));
+    m_densityMenu->setEnabled(false);
+
+    m_densityGroup = new QActionGroup(this);
+    m_densityGroup->setExclusive(true);
+    connect(m_densityGroup, &QActionGroup::triggered,
+            this, &MainWindow::onDensityTypeChanged);
+
+    auto addDensityAction = [&](const QString &text, DensityType dt) {
+        QAction *a = m_densityMenu->addAction(text);
+        a->setCheckable(true);
+        a->setData((int)dt);
+        m_densityGroup->addAction(a);
+        if ((int)dt == m_savedDensityType) a->setChecked(true);
+        return a;
+    };
+    addDensityAction(tr("&Off"),           DensityType::None);
+    addDensityAction(tr("|&B|"),           DensityType::B_mag);
+    addDensityAction(tr("|&Re(B)|"),       DensityType::B_real);
+    addDensityAction(tr("|&Im(B)|"),       DensityType::B_imag);
+    addDensityAction(tr("|&H|"),           DensityType::H_mag);
+    addDensityAction(tr("|&J|"),           DensityType::J_mag);
+    addDensityAction(tr("Iron &Loss"),     DensityType::IronLoss);
 
     actOverlayContours = viewMenu->addAction(tr("Overlay &Contours"));
     actOverlayContours->setCheckable(true);
@@ -320,6 +337,11 @@ void MainWindow::createMenus()
     QMenu *analysisMenu = menuBar()->addMenu(tr("&Analysis"));
     analysisMenu->addAction(tr("&Analyze"), this, &MainWindow::onAnalyze);
     analysisMenu->addAction(tr("&View Results"), this, &MainWindow::onViewResults);
+    analysisMenu->addSeparator();
+    actClearOverlay = analysisMenu->addAction(tr("&Clear Results Overlay"),
+        this, &MainWindow::onClearOverlay);
+    actClearOverlay->setToolTip(tr("Remove the results overlay and show the geometry editor"));
+    actClearOverlay->setEnabled(false);  // enabled when overlay is loaded
 
     // ---- Move menu ----
     QMenu *moveMenu = menuBar()->addMenu(tr("&Move"));
@@ -349,6 +371,62 @@ void MainWindow::createToolBars()
 
     // Mesh toolbar
     meshToolBar = addToolBar(tr("Mesh"));
+    meshToolBar->addAction(actClearOverlay);
+
+    // Color scale controls
+    meshToolBar->addSeparator();
+    m_scaleAutoCheck = new QCheckBox(tr("Auto Scale"));
+    m_scaleAutoCheck->setChecked(true);
+    m_scaleAutoCheck->setToolTip(tr("Auto-compute color scale from data.\n"
+                                     "Uncheck to set manual min/max."));
+    meshToolBar->addWidget(m_scaleAutoCheck);
+
+    auto *minLabel = new QLabel(tr(" Min:"));
+    meshToolBar->addWidget(minLabel);
+    m_scaleMinSpin = new QDoubleSpinBox;
+    m_scaleMinSpin->setRange(0, 1e9);
+    m_scaleMinSpin->setDecimals(1);
+    m_scaleMinSpin->setValue(0.0);
+    m_scaleMinSpin->setEnabled(false);
+    m_scaleMinSpin->setToolTip(tr("Manual color scale minimum"));
+    m_scaleMinSpin->setFixedWidth(90);
+    meshToolBar->addWidget(m_scaleMinSpin);
+
+    auto *maxLabel = new QLabel(tr(" Max:"));
+    meshToolBar->addWidget(maxLabel);
+    m_scaleMaxSpin = new QDoubleSpinBox;
+    m_scaleMaxSpin->setRange(0, 1e9);
+    m_scaleMaxSpin->setDecimals(1);
+    m_scaleMaxSpin->setValue(1.0);
+    m_scaleMaxSpin->setEnabled(false);
+    m_scaleMaxSpin->setToolTip(tr("Manual color scale maximum"));
+    m_scaleMaxSpin->setFixedWidth(90);
+    meshToolBar->addWidget(m_scaleMaxSpin);
+
+    connect(m_scaleAutoCheck, &QCheckBox::toggled, this, [this](bool autoOn) {
+        m_scaleMinSpin->setEnabled(!autoOn);
+        m_scaleMaxSpin->setEnabled(!autoOn);
+        if (m_overlayRenderer) {
+            m_overlayRenderer->setAutoScale(autoOn);
+            if (!autoOn) {
+                m_overlayRenderer->setScaleRange(m_scaleMinSpin->value(),
+                                                  m_scaleMaxSpin->value());
+            }
+            { DrawingWidget *dw = currentDrawing(); if (dw) dw->update(); }
+        }
+    });
+
+    auto onScaleChanged = [this]() {
+        if (m_overlayRenderer && !m_scaleAutoCheck->isChecked()) {
+            m_overlayRenderer->setScaleRange(m_scaleMinSpin->value(),
+                                              m_scaleMaxSpin->value());
+            { DrawingWidget *dw = currentDrawing(); if (dw) dw->update(); }
+        }
+    };
+    connect(m_scaleMinSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, onScaleChanged);
+    connect(m_scaleMaxSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, onScaleChanged);
 }
 
 // ---------------------------------------------------------------
@@ -521,7 +599,8 @@ void MainWindow::openFile(const QString &path)
             m_overlayRenderer = nullptr;
             delete m_overlayDoc;
             m_overlayDoc = nullptr;
-            actOverlayDensity->setEnabled(false);
+            m_densityMenu->setEnabled(false);
+            actClearOverlay->setEnabled(false);
             actOverlayContours->setEnabled(false);
             actOverlayMesh->setEnabled(false);
             actOverlayLegend->setEnabled(false);
@@ -554,8 +633,10 @@ void MainWindow::openFile(const QString &path)
 
         FemmeDocument *doc = drawing->document();
 
-        // --- Auto mesh + solve ---
-        // Check if an .ans file already exists and is up to date
+        // --- Auto-load results if available ---
+        // If an up-to-date .ans file exists, load the overlay directly.
+        // Do NOT auto-mesh or auto-solve — the user should trigger that
+        // manually via the Analyze menu.
         QString ansPath = doc->filePath();
         if (ansPath.endsWith(".fem", Qt::CaseInsensitive))
             ansPath = ansPath.left(ansPath.length() - 4) + ".ans";
@@ -568,35 +649,7 @@ void MainWindow::openFile(const QString &path)
         if (ansInfo.exists() && ansInfo.lastModified() >= femInfo.lastModified()) {
             // Results are up to date, just load overlay directly
             loadResultsOverlay(drawing);
-            return;
         }
-
-        // Need to mesh and solve
-        if (m_solver->isRunning()) {
-            updateStatus(tr("Solver busy — skipping auto-solve."));
-            return;
-        }
-
-        updateStatus(tr("Auto-meshing..."));
-        if (!m_meshGen->generateMesh(doc)) {
-            updateStatus(tr("Auto-mesh failed: ") + m_meshGen->lastError());
-            return;
-        }
-        drawing->update();
-        updateStatus(QString("Auto-mesh: %1 nodes, %2 elements. Starting solver...")
-            .arg(doc->meshNodes.size()).arg(doc->meshElements.size()));
-
-        // Save before solving (solver reads from disk)
-        if (!doc->saveToFile(doc->filePath())) {
-            updateStatus(tr("Could not save file before auto-solve."));
-            return;
-        }
-
-        // Track which drawing widget the auto-solve is for
-        m_autoSolvePending = true;
-        m_autoSolveTarget = drawing;
-
-        m_solver->runSolver(doc);
     });
 }
 
@@ -1367,7 +1420,7 @@ void MainWindow::loadResultsOverlay(DrawingWidget *dw)
 
     m_overlayRenderer = new ResultsOverlayRenderer();
     m_overlayRenderer->setDocument(m_overlayDoc);
-    m_overlayRenderer->setShowDensity(m_savedOverlayDensity ? DensityType::B_mag : DensityType::None);
+    m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
     m_overlayRenderer->setShowContours(m_savedOverlayContours);
     m_overlayRenderer->setShowLegend(m_savedOverlayLegend);
     m_overlayRenderer->setShowMesh(m_savedOverlayMesh);
@@ -1381,10 +1434,12 @@ void MainWindow::loadResultsOverlay(DrawingWidget *dw)
 
     // Enable toggle actions and restore saved states (block signals to avoid
     // re-triggering slots while we set the checked states)
-    actOverlayDensity->blockSignals(true);
-    actOverlayDensity->setEnabled(true);
-    actOverlayDensity->setChecked(m_savedOverlayDensity);
-    actOverlayDensity->blockSignals(false);
+    m_densityMenu->setEnabled(true);
+    for (QAction *a : m_densityGroup->actions()) {
+        a->blockSignals(true);
+        a->setChecked(a->data().toInt() == m_savedDensityType);
+        a->blockSignals(false);
+    }
 
     actOverlayContours->blockSignals(true);
     actOverlayContours->setEnabled(true);
@@ -1401,6 +1456,11 @@ void MainWindow::loadResultsOverlay(DrawingWidget *dw)
     actOverlayLegend->setChecked(m_savedOverlayLegend);
     actOverlayLegend->blockSignals(false);
 
+    actClearOverlay->setEnabled(true);
+
+    // Initialize scale spinboxes from data bounds
+    updateScaleSpinboxes();
+
     updateStatus(QString("Results overlay loaded: B_max=%1 T")
         .arg(m_overlayDoc->B_High, 0, 'e', 4));
 }
@@ -1409,12 +1469,14 @@ void MainWindow::loadResultsOverlay(DrawingWidget *dw)
 // Overlay toggle slots
 // ---------------------------------------------------------------
 
-void MainWindow::onToggleOverlayDensity(bool checked)
+void MainWindow::onDensityTypeChanged(QAction *action)
 {
-    m_savedOverlayDensity = checked;
-    QSettings().setValue("view/overlayDensity", checked);
+    int type = action->data().toInt();
+    m_savedDensityType = type;
+    QSettings().setValue("view/densityType", type);
     if (!m_overlayRenderer) return;
-    m_overlayRenderer->setShowDensity(checked ? DensityType::B_mag : DensityType::None);
+    m_overlayRenderer->setShowDensity(static_cast<DensityType>(type));
+    updateScaleSpinboxes();
     DrawingWidget *dw = currentDrawing();
     if (dw) dw->refreshDisplay();
 }
@@ -1447,6 +1509,55 @@ void MainWindow::onToggleOverlayLegend(bool checked)
     m_overlayRenderer->setShowLegend(checked);
     DrawingWidget *dw = currentDrawing();
     if (dw) dw->refreshDisplay();
+}
+
+void MainWindow::updateScaleSpinboxes()
+{
+    if (!m_overlayRenderer || !m_overlayDoc) return;
+
+    // Get current data bounds for the active density type
+    double lo = 0.0, hi = 1.0;
+    DensityType dt = static_cast<DensityType>(m_savedDensityType);
+    if (dt == DensityType::IronLoss) {
+        lo = m_overlayDoc->ironLoss_Low;
+        hi = m_overlayDoc->ironLoss_High;
+    } else {
+        lo = m_overlayDoc->B_Low;
+        hi = m_overlayDoc->B_High;
+    }
+
+    m_scaleMinSpin->blockSignals(true);
+    m_scaleMaxSpin->blockSignals(true);
+    m_scaleMinSpin->setValue(lo);
+    m_scaleMaxSpin->setValue(hi);
+    m_scaleMinSpin->blockSignals(false);
+    m_scaleMaxSpin->blockSignals(false);
+
+    // Reset to auto when loading new data
+    m_scaleAutoCheck->setChecked(true);
+    m_overlayRenderer->setAutoScale(true);
+}
+
+void MainWindow::onClearOverlay()
+{
+    DrawingWidget *dw = currentDrawing();
+    if (dw)
+        dw->setResultsOverlay(nullptr);
+
+    delete m_overlayRenderer;
+    m_overlayRenderer = nullptr;
+    delete m_overlayDoc;
+    m_overlayDoc = nullptr;
+
+    // Disable overlay-related UI
+    actClearOverlay->setEnabled(false);
+    m_densityMenu->setEnabled(false);
+    actOverlayContours->setEnabled(false);
+    actOverlayMesh->setEnabled(false);
+    actOverlayLegend->setEnabled(false);
+
+    if (dw) dw->update();
+    updateStatus(tr("Results overlay cleared."));
 }
 
 // ---------------------------------------------------------------
@@ -1630,7 +1741,7 @@ void MainWindow::onParametricMotion()
     // After adaptive refinement the overlay is cleared, so create one now.
     if (!m_overlayRenderer) {
         m_overlayRenderer = new ResultsOverlayRenderer();
-        m_overlayRenderer->setShowDensity(m_savedOverlayDensity ? DensityType::B_mag : DensityType::None);
+        m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
         m_overlayRenderer->setShowContours(m_savedOverlayContours);
         m_overlayRenderer->setShowLegend(m_savedOverlayLegend);
         m_overlayRenderer->setShowMesh(m_savedOverlayMesh);
@@ -1640,6 +1751,7 @@ void MainWindow::onParametricMotion()
         dw->setResultsOverlay(m_overlayRenderer);
     }
 
+    m_motionDw = dw;  // cache for onMotionFinished (currentDrawing() may lose focus)
     updateStatus(tr("Starting parametric motion sweep..."));
 
     m_motionRunner->start(config, doc, dw, m_meshGen, m_solver, m_overlayRenderer);
@@ -1655,22 +1767,76 @@ void MainWindow::onMotionFinished(bool success, const QString &csvPath, const QS
     if (!success) {
         updateStatus(tr("Motion sweep failed or aborted."));
         // Still refresh the drawing (geometry was restored)
-        DrawingWidget *dw = currentDrawing();
+        DrawingWidget *dw = m_motionDw ? m_motionDw : currentDrawing();
+        m_motionDw = nullptr;
         if (dw) dw->update();
         return;
     }
 
-    // Clear the stale overlay from the sweep (its mesh positions are from
-    // the moved geometry and no longer match the restored geometry).
-    DrawingWidget *dw = currentDrawing();
-    if (dw) {
-        dw->setResultsOverlay(nullptr);
-        dw->update();
-    }
+    // The sweep restored geometry and detached the stale overlay.
+    // Clean up the old overlay objects.
     delete m_overlayRenderer;
     m_overlayRenderer = nullptr;
     delete m_overlayDoc;
     m_overlayDoc = nullptr;
+
+    // Use the cached drawing widget from sweep start — currentDrawing()
+    // can return nullptr if MDI focus shifted during the sweep.
+    DrawingWidget *dw = m_motionDw;
+    m_motionDw = nullptr;
+
+    // Take the last step's ResultsDocument from the motion runner.
+    // This doc has per-element iron loss data already populated, and its
+    // mesh is from the final solve step.  The overlay renders from its own
+    // mesh independently of the GUI geometry, so it works fine.
+    ResultsDocument *sweepDoc = m_motionRunner ? m_motionRunner->takeLastResults() : nullptr;
+
+    if (sweepDoc && dw) {
+        sweepDoc->setParent(this);  // MainWindow owns it now
+        m_overlayDoc = sweepDoc;
+        m_overlayRenderer = new ResultsOverlayRenderer();
+        m_overlayRenderer->setDocument(m_overlayDoc);
+
+        // If iron losses were computed, auto-switch to Iron Loss density type
+        if (m_motionRunner->hasIronLossResult()) {
+            m_savedDensityType = (int)DensityType::IronLoss;
+            QSettings().setValue("view/densityType", m_savedDensityType);
+        }
+
+        m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
+        m_overlayRenderer->setShowContours(m_savedOverlayContours);
+        m_overlayRenderer->setShowLegend(m_savedOverlayLegend);
+        m_overlayRenderer->setShowMesh(m_savedOverlayMesh);
+
+        QAction *checkedAA = m_aaGroup->checkedAction();
+        if (checkedAA)
+            m_overlayRenderer->setAAQuality(static_cast<AAQuality>(checkedAA->data().toInt()));
+
+        dw->setResultsOverlay(m_overlayRenderer);
+
+        // Enable overlay UI controls
+        m_densityMenu->setEnabled(true);
+        for (QAction *a : m_densityGroup->actions()) {
+            a->blockSignals(true);
+            a->setChecked(a->data().toInt() == m_savedDensityType);
+            a->blockSignals(false);
+        }
+        actOverlayContours->setEnabled(true);
+        actOverlayContours->setChecked(m_savedOverlayContours);
+        actOverlayMesh->setEnabled(true);
+        actOverlayMesh->setChecked(m_savedOverlayMesh);
+        actOverlayLegend->setEnabled(true);
+        actOverlayLegend->setChecked(m_savedOverlayLegend);
+        actClearOverlay->setEnabled(true);
+
+        // Initialize scale spinboxes from sweep data bounds
+        updateScaleSpinboxes();
+
+        updateStatus(tr("Motion sweep complete — results overlay active."));
+    } else if (dw) {
+        // Fallback: try loading from .ans file (won't have iron loss data)
+        loadResultsOverlay(dw);
+    }
 
     QString msg = tr("Motion sweep complete!\n\nCSV: %1").arg(csvPath);
     if (!animPath.isEmpty())

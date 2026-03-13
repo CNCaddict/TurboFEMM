@@ -10,6 +10,8 @@
 #include <QActionGroup>
 #include <QPlainTextEdit>
 #include <QSplitter>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
 
 class DrawingWidget;
 class FemmeDocument;
@@ -55,6 +57,7 @@ private slots:
     void onAddBoundaryRegion();
     void onAnalyze();
     void onViewResults();
+    void onClearOverlay();
 
     // Solver finished
     void onSolverFinished(bool success);
@@ -70,7 +73,7 @@ private slots:
     void onZoomFit();
 
     // Overlay toggles
-    void onToggleOverlayDensity(bool checked);
+    void onDensityTypeChanged(QAction *action);
     void onToggleOverlayContours(bool checked);
     void onToggleOverlayMesh(bool checked);
     void onToggleOverlayLegend(bool checked);
@@ -102,6 +105,7 @@ private:
 
     // Load results overlay onto a DrawingWidget
     void loadResultsOverlay(DrawingWidget *dw);
+    void updateScaleSpinboxes();
 
     QMdiArea *mdiArea;
     QSplitter *m_splitter = nullptr;
@@ -126,8 +130,11 @@ private:
     QAction *actArc;
     QAction *actBlockLabel;
 
+    // Density plot submenu + action group
+    QMenu *m_densityMenu = nullptr;
+    QActionGroup *m_densityGroup = nullptr;
+
     // Overlay toggle actions
-    QAction *actOverlayDensity = nullptr;
     QAction *actOverlayContours = nullptr;
     QAction *actOverlayMesh = nullptr;
     QAction *actOverlayLegend = nullptr;
@@ -145,6 +152,15 @@ private:
     QAction *actAAUltra = nullptr;
     QAction *actAAExtreme = nullptr;
 
+    // Manual color scale controls
+    QCheckBox *m_scaleAutoCheck = nullptr;
+    QDoubleSpinBox *m_scaleMinSpin = nullptr;
+    QDoubleSpinBox *m_scaleMaxSpin = nullptr;
+    QWidget *m_scaleWidget = nullptr;  // container in toolbar
+
+    // Clear overlay / reset geometry action
+    QAction *actClearOverlay = nullptr;
+
     // Mesh and solver
     MeshGenerator *m_meshGen;
     SolverRunner *m_solver;
@@ -159,10 +175,11 @@ private:
 
     // Motion runner
     MotionRunner *m_motionRunner = nullptr;
+    DrawingWidget *m_motionDw = nullptr;  // cached drawing widget during sweep
     ModelDataDialog *m_modelDataDialog = nullptr;
 
     // Persistent view settings (saved/restored via QSettings)
-    bool m_savedOverlayDensity = true;
+    int m_savedDensityType = 1;  // (int)DensityType::B_mag
     bool m_savedOverlayContours = true;
     bool m_savedOverlayMesh = false;
     bool m_savedOverlayLegend = true;

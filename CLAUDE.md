@@ -5,6 +5,13 @@
 
 When your session ends, **append your work to DEVLOG.md** following the existing format (newest entry first).
 
+## Release & Changelog Requirements
+Every time code is pushed to GitHub:
+1. **Update `DEVLOG.md`** with all changes from the session (newest entry first)
+2. **Update `CHANGELOG.md`** (if it exists) with user-facing changes — bug fixes, new features, UI improvements
+3. **Post the changelog to GitHub** as a release or update the existing release notes
+4. Never push without updating both the devlog and changelog first
+
 ## Testing Requirements
 - **Run unit tests after every code change:** `cd build && make -j8 femm-tests && ./tests/femm-tests`
 - **All 76+ tests must pass** before considering any change complete

@@ -34,6 +34,10 @@ private:
     QDoubleSpinBox *m_magDir;
     QSpinBox *m_turns;
     QCheckBox *m_isExternal;
+    QSpinBox *m_inGroup;
+
+    // Iron loss
+    QCheckBox *m_calcLosses;
 };
 
 #endif // BLOCKPROPSDLG_H

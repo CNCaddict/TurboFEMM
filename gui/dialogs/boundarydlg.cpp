@@ -38,6 +38,12 @@ BoundaryDialog::BoundaryDialog(FemmeDocument *doc, FBoundaryProp *bprop,
     m_format->addItem(tr("Periodic Air Gap"));
     m_format->addItem(tr("Anti-Periodic Air Gap"));
     m_format->setCurrentIndex(bprop->bdryFormat);
+    m_format->setToolTip(tr("Prescribed A: set vector potential on boundary (A=0 for flux confinement).\n"
+                             "Small Skin Depth: impedance BC for lossy conducting boundaries.\n"
+                             "Mixed: Robin BC (dA/dn + c0*A = c1).\n"
+                             "Strategic Dual Image: open boundary approximation.\n"
+                             "Periodic/Anti-Periodic: link two boundaries together.\n"
+                             "Air Gap: sliding boundary for rotor motion (periodic/anti-periodic)."));
     topLayout->addRow(tr("BC type:"), m_format);
 
     mainLayout->addLayout(topLayout);
@@ -50,6 +56,8 @@ BoundaryDialog::BoundaryDialog(FemmeDocument *doc, FBoundaryProp *bprop,
     m_A0->setRange(-1e12, 1e12);
     m_A0->setDecimals(6);
     m_A0->setValue(bprop->A0);
+    m_A0->setToolTip(tr("Constant term of prescribed vector potential.\n"
+                          "A = A0 + A1*r + A2*r^2. Set A0=0 for homogeneous Dirichlet."));
     prescLayout->addRow(tr("A0:"), m_A0);
 
     m_A1 = new QDoubleSpinBox;
@@ -81,6 +89,8 @@ BoundaryDialog::BoundaryDialog(FemmeDocument *doc, FBoundaryProp *bprop,
     m_mu->setRange(0.0, 1e12);
     m_mu->setDecimals(6);
     m_mu->setValue(bprop->Mu);
+    m_mu->setToolTip(tr("Relative permeability of the boundary material\n"
+                          "for the impedance boundary condition."));
     skinLayout->addRow(tr("Relative \u03bc:"), m_mu);
 
     m_sig = new QDoubleSpinBox;
@@ -88,6 +98,8 @@ BoundaryDialog::BoundaryDialog(FemmeDocument *doc, FBoundaryProp *bprop,
     m_sig->setDecimals(6);
     m_sig->setSuffix(tr(" MS/m"));
     m_sig->setValue(bprop->Sig);
+    m_sig->setToolTip(tr("Electrical conductivity of the boundary material\n"
+                           "for the impedance boundary condition."));
     skinLayout->addRow(tr("Conductivity \u03c3:"), m_sig);
 
     mainLayout->addWidget(skinGroup);
@@ -131,6 +143,8 @@ BoundaryDialog::BoundaryDialog(FemmeDocument *doc, FBoundaryProp *bprop,
     m_innerAngle->setDecimals(4);
     m_innerAngle->setSuffix(tr(" deg"));
     m_innerAngle->setValue(bprop->innerAngle);
+    m_innerAngle->setToolTip(tr("Angular position of the inner (rotor-side) air gap boundary.\n"
+                                  "Used for periodic/anti-periodic air gap boundaries."));
     gapLayout->addRow(tr("Inner angle:"), m_innerAngle);
 
     m_outerAngle = new QDoubleSpinBox;
@@ -138,6 +152,8 @@ BoundaryDialog::BoundaryDialog(FemmeDocument *doc, FBoundaryProp *bprop,
     m_outerAngle->setDecimals(4);
     m_outerAngle->setSuffix(tr(" deg"));
     m_outerAngle->setValue(bprop->outerAngle);
+    m_outerAngle->setToolTip(tr("Angular position of the outer (stator-side) air gap boundary.\n"
+                                  "Used for periodic/anti-periodic air gap boundaries."));
     gapLayout->addRow(tr("Outer angle:"), m_outerAngle);
 
     mainLayout->addWidget(gapGroup);

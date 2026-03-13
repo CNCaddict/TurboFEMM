@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QLabel>
+#include <cmath>
 
 ModelDataDialog::ModelDataDialog(FemmeDocument *doc, DrawingWidget *drawing,
                                  QWidget *parent)
@@ -113,10 +114,10 @@ static QTableWidgetItem *roItem(const QString &text)
 void ModelDataDialog::populateBlockLabels()
 {
     m_blockTable->clear();
-    m_blockTable->setColumnCount(10);
+    m_blockTable->setColumnCount(11);
     m_blockTable->setHorizontalHeaderLabels({
         tr("#"), tr("Name"), tr("X"), tr("Y"), tr("Material"), tr("Circuit"),
-        tr("Turns"), tr("Max Area"), tr("Mag Dir"), tr("Group")
+        tr("Turns"), tr("Max Area"), tr("Mag Dir"), tr("Group"), tr("Calc Losses")
     });
 
     int n = (int)m_doc->blockLabels.size();
@@ -168,6 +169,18 @@ void ModelDataDialog::populateBlockLabels()
         m_blockTable->setItem(i, 7, new QTableWidgetItem(QString::number(bl.maxArea, 'f', 4)));
         m_blockTable->setItem(i, 8, new QTableWidgetItem(QString::number(bl.magDir, 'f', 2)));
         m_blockTable->setItem(i, 9, new QTableWidgetItem(QString::number(bl.inGroup)));
+
+        // Calc Losses checkbox
+        auto *lossCb = new QCheckBox;
+        lossCb->setChecked(bl.calculateLosses);
+        connect(lossCb, &QCheckBox::toggled, this, [this, i](bool checked) {
+            if (m_updatingTable) return;
+            if (i < (int)m_doc->blockLabels.size()) {
+                m_doc->blockLabels[i].calculateLosses = checked;
+                markModified();
+            }
+        });
+        m_blockTable->setCellWidget(i, 10, lossCb);
     }
 
     m_blockTable->resizeColumnsToContents();
@@ -444,7 +457,10 @@ void ModelDataDialog::onBlockLabelCellChanged(int row, int col)
     // cols 4,5 handled by combo signals
     case 6: { int v = text.toInt(&ok); if (ok) bl.turns = v; } break;
     case 7: { double v = text.toDouble(&ok); if (ok) bl.maxArea = v; } break;
-    case 8: { double v = text.toDouble(&ok); if (ok) bl.magDir = v; } break;
+    case 8: { double v = text.toDouble(&ok); if (ok) {
+        v = std::fmod(v, 360.0); if (v < 0) v += 360.0;
+        bl.magDir = v;
+    } } break;
     case 9: { int v = text.toInt(&ok); if (ok) bl.inGroup = v; } break;
     default: return;
     }

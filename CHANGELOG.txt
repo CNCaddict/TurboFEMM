@@ -1,0 +1,54 @@
+TurboFEMM Changelog
+===================
+
+Version 4.3.0 (2026-03-13)
+---------------------------
+
+NEW FEATURES:
+  - 3-phase motor module: automatic commutation, phase angle optimizer,
+    RMS current input, ABC circuit assignment, pole pair configuration
+  - Iron loss computation: Steinmetz model (Kh, Kc, Ke) with material
+    presets (M-19, M-36, M-43, etc.)
+  - Eddy current losses for solid conductors (Az-based, e.g. NdFeB magnets)
+  - Parametric motion sweep: rotate or translate a group with per-step
+    results (PNG frames, animated GIF, CSV export)
+  - Density heatmap overlay with manual color scale controls (min/max)
+  - H-adaptive mesh refinement (ZZ error estimator, two-phase refine/coarsen)
+  - Metal GPU-accelerated PCG solver backend (macOS)
+  - In-process solver (no disk I/O for intermediate results)
+  - Comprehensive UI tooltips on all dialog parameters
+
+IMPROVEMENTS:
+  - Torque diagnostic output on first motor sweep step (depth, lengthConv,
+    maxB, group, rotation center) for debugging scaling issues
+  - Torque scaling test verifying 1A/5A/10A consistency
+  - Results overlay persists across motion sweep steps
+  - CSV export with configurable column selection
+  - Iron loss results in CSV (total watts, per-region breakdown)
+  - Motor config dump in sweep log for diagnostics
+  - Per-step diagnostic logging (electrical angle, phase currents,
+    energy, MST torque)
+
+BUG FIXES:
+  - Fixed motor optimizer finding braking angle instead of motoring angle
+    (peak detection now requires positive torque)
+  - Fixed commutation tracking sign (subtract rotor advance, not add)
+  - Fixed CSV column header/data ordering mismatch for motor columns
+  - Fixed depth units in torque and energy computation (was 1000x off
+    for millimeter models)
+  - Fixed depth units in iron loss total watts computation
+  - Fixed iron loss W/m^3 vs W/kg confusion (Steinmetz coefficients
+    are in W/m^3, not W/kg)
+  - Fixed optimizer VW torque sign to match physical MST torque direction
+  - Removed auto-mesh/solve on file open (was blocking UI for large models)
+  - Fixed overlay disappearing after motion sweep
+  - Fixed 3-phase commutation sign convention
+
+ARCHITECTURE:
+  - GPU backend abstracted behind GPUBackend interface
+  - Anderson acceleration for nonlinear materials with relaxation fallback
+  - Triangle library for mesh generation (PSLG mode)
+  - Full compatibility with original FEMM 4.2 .fem file format
+  - Qt 6 GUI with cross-platform support
+
+Based on FEMM 4.2 by David Meeker (21 Apr 2019).

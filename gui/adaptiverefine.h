@@ -23,7 +23,7 @@ struct MeshEdge;
 struct AdaptiveConfig {
     double tolerance = 0.03;         // relative error tolerance (3%)
     int maxIterations = 5;           // max refinement passes
-    double markingFraction = 0.30;   // fraction of elements to refine (top 30%)
+    double markingFraction = 0.20;   // fraction of elements to refine (top 20%)
 
     // Coarsening back-off: after reaching tolerance, try to coarsen
     // the mesh to find the minimum density that still meets tolerance.

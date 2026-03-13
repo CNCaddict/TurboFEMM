@@ -21,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>FEMM 4.2 - Finite Element Method Magnetics</string>
+	<string>TurboFEMM 4.3 - Finite Element Method Magnetics</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSDesktopFolderUsageDescription</key>

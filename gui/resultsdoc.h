@@ -49,6 +49,9 @@ struct SolnLabel {
     int inGroup = 0;
     bool isExternal = false;
     bool isSelected = false;
+
+    // Iron loss toggle (from block label; lamination data lives on SolnMaterial)
+    bool calculateLosses = false;
 };
 
 // ---------------------------------------------------------------
@@ -66,6 +69,11 @@ struct SolnMaterial {
     std::vector<double> Bdata;
     std::vector<CmplxF> Hdata;
     CmplxF mu_fdx, mu_fdy;  // frequency-dependent permeability
+
+    // Steinmetz iron loss coefficients
+    double Kh = 0.0, Kc = 0.0, Ke = 0.0;
+    double alpha_loss = 2.0;
+    double density = 0.0;  // kg/m^3
 };
 
 // ---------------------------------------------------------------
@@ -90,6 +98,7 @@ enum class DensityType {
     B_imag,       // |Im(B)|
     H_mag,        // |H|
     J_mag,        // |J|
+    IronLoss,     // Iron loss density (W/kg) from Steinmetz model
 };
 
 // ---------------------------------------------------------------
@@ -173,6 +182,11 @@ public:
     double A_Low = 0.0, A_High = 0.0;
     double B_Low = 0.0, B_High = 0.0;
     int numContours = 19;
+
+    // Per-element iron loss (W/kg), populated by motion runner after sweep
+    // Indexed by element index, same size as elements[] when populated.
+    std::vector<double> ironLoss_Wkg;
+    double ironLoss_Low = 0.0, ironLoss_High = 0.0;
 
     // Smoothing
     bool smoothB = true;

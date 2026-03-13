@@ -434,6 +434,21 @@ bool InProcessSolver::solveExistingMesh(FemmeDocument *doc,
             lua = prevLua;
             return false;
         }
+
+        // Copy Steinmetz loss coefficients from GUI material props to results
+        for (int i = 0; i < numMats && i < (int)resultsOut->materials.size(); i++) {
+            resultsOut->materials[i].Kh = doc->materialProps[i].Kh;
+            resultsOut->materials[i].Kc = doc->materialProps[i].Kc;
+            resultsOut->materials[i].Ke = doc->materialProps[i].Ke;
+            resultsOut->materials[i].alpha_loss = doc->materialProps[i].alpha_loss;
+            resultsOut->materials[i].density = doc->materialProps[i].density;
+        }
+        // Copy block label loss settings to results
+        for (int i = 0; i < rNumLabels && i < (int)resultsOut->labels.size(); i++) {
+            if (i < (int)doc->blockLabels.size()) {
+                resultsOut->labels[i].calculateLosses = doc->blockLabels[i].calculateLosses;
+            }
+        }
     } else {
         // Harmonic solve
         CBigComplexLinProb L;

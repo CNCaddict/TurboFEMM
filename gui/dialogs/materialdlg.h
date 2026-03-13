@@ -22,6 +22,7 @@ public:
 
 private slots:
     void onLamTypeChanged(int index);
+    void onPresetChanged(int index);
     void onAccept();
 
 private:
@@ -45,6 +46,14 @@ private:
     QDoubleSpinBox *m_thetaHy;
     QSpinBox *m_nStrands;
     QDoubleSpinBox *m_wireD;
+
+    // Steinmetz iron loss
+    QComboBox *m_lossPreset;
+    QDoubleSpinBox *m_Kh;
+    QDoubleSpinBox *m_Kc;
+    QDoubleSpinBox *m_Ke;
+    QDoubleSpinBox *m_alphaLoss;
+    QDoubleSpinBox *m_density;
 };
 
 #endif // MATERIALDLG_H

@@ -21,6 +21,13 @@ private slots:
 
     // Load existing .ans file and compare B_High with in-process solve
     void lrkAnsFileResults();
+
+    // Motor torque diagnostic: solve LRK at multiple rotor positions
+    // with 3-phase commutation and verify torque consistency
+    void lrkMotorTorqueDiagnostic();
+
+    // Torque scaling: verify torque at 1A vs 10A scales roughly linearly
+    void lrkTorqueScaling();
 };
 
 #endif // TEST_SOLVER_H

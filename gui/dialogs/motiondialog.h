@@ -39,6 +39,12 @@ struct MotionConfig {
     bool csvVectorPotential = true; // include A_max, A_min
     bool csvEnergy = true;        // include Energy_J, Area_m2
     bool csvForceTorque = true;   // include Force_X, Force_Y, Torque
+    bool csvIronLoss = false;     // include iron loss columns
+
+    // --- Iron loss ---
+    bool calculateLosses = false; // global iron loss toggle
+    double operatingFreqHz = 0.0; // electrical frequency for loss computation (Hz)
+    double motorRPM = 0.0;        // motor RPM (for frequency derivation)
 
     // --- Motor module ---
     bool motorEnabled = false;
@@ -109,6 +115,11 @@ private:
     bool m_csvVectorPotential = true;
     bool m_csvEnergy = true;
     bool m_csvForceTorque = true;
+    bool m_csvIronLoss = false;
+
+    QCheckBox *m_calculateLosses;
+    QDoubleSpinBox *m_motorRPM;
+    QDoubleSpinBox *m_operatingFreq;
 
     // --- Motor module widgets ---
     QCheckBox *m_motorEnabled;

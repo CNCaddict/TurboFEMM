@@ -71,6 +71,9 @@ struct FBlockLabel {
     bool isDefault = false;
     QString name;  // user-assignable label (optional)
 
+    // Iron loss toggle (per-block; lamination data lives on the material)
+    bool calculateLosses = false;   // enable loss calculation for this block
+
     double distanceTo(double xo, double yo) const {
         return std::sqrt((x-xo)*(x-xo) + (y-yo)*(y-yo));
     }
@@ -79,6 +82,13 @@ struct FBlockLabel {
 // ---------------------------------------------------------------
 // Material and boundary properties
 // ---------------------------------------------------------------
+
+// Core loss data point (from manufacturer datasheet)
+struct CoreLossPoint {
+    double B = 0.0;          // peak flux density (T)
+    double freq = 0.0;       // frequency (Hz)
+    double loss_Wkg = 0.0;   // specific loss (W/kg)
+};
 
 struct FMaterialProp {
     QString blockName;
@@ -97,6 +107,17 @@ struct FMaterialProp {
     double Theta_hy = 0.0;    // hysteresis angle y
     int nStrands = 0;
     double wireD = 0.0;       // strand diameter, mm
+
+    // Steinmetz iron loss coefficients
+    // P = Kh*f*B^alpha + Kc*(f*B)^2 + Ke*(f*B)^1.5  [W/m^3]
+    double Kh = 0.0;          // hysteresis loss coefficient
+    double Kc = 0.0;          // classical eddy current coefficient
+    double Ke = 0.0;          // excess/anomalous loss coefficient
+    double alpha_loss = 2.0;  // Steinmetz exponent (typically 1.6-2.5)
+    double density = 0.0;     // material density (kg/m^3), for W/kg conversion
+
+    // Core loss data points for automatic coefficient fitting
+    std::vector<CoreLossPoint> coreLossData;
 };
 
 struct FBoundaryProp {

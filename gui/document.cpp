@@ -294,6 +294,27 @@ bool FemmeDocument::loadFromFile(const QString &path)
                 }
             }
         }
+        // Steinmetz iron loss coefficients
+        else if (token == "<kh>") { mprop.Kh = val.toDouble(); }
+        else if (token == "<kc>") { mprop.Kc = val.toDouble(); }
+        else if (token == "<ke>") { mprop.Ke = val.toDouble(); }
+        else if (token == "<alpha_loss>") { mprop.alpha_loss = val.toDouble(); }
+        else if (token == "<density>") { mprop.density = val.toDouble(); }
+        else if (token == "<corelosspoints>") {
+            int npts = val.toInt();
+            mprop.coreLossData.clear();
+            for (int j = 0; j < npts && !in.atEnd(); j++) {
+                QString clLine = in.readLine().trimmed();
+                QStringList parts = clLine.split(QRegularExpression("\\s+"));
+                if (parts.size() >= 3) {
+                    CoreLossPoint pt;
+                    pt.B = parts[0].toDouble();
+                    pt.freq = parts[1].toDouble();
+                    pt.loss_Wkg = parts[2].toDouble();
+                    mprop.coreLossData.push_back(pt);
+                }
+            }
+        }
         else if (token == "<endblock>") {
             materialProps.push_back(mprop);
         }
@@ -450,21 +471,36 @@ bool FemmeDocument::loadFromFile(const QString &path)
                     if (ci > 0) blk.inCircuit = circuitPropName(ci - 1);
                 }
 
-                if (parts.size() >= 6) blk.magDir = parts[5].toDouble();
+                if (parts.size() >= 6) {
+                    blk.magDir = parts[5].toDouble();
+                    // Normalize to [0, 360) — older files may have accumulated angles
+                    blk.magDir = std::fmod(blk.magDir, 360.0);
+                    if (blk.magDir < 0) blk.magDir += 360.0;
+                }
                 if (parts.size() >= 7) blk.inGroup = parts[6].toInt();
                 if (parts.size() >= 8) blk.turns = parts[7].toInt();
 
-                // external + default flags packed
+                // external + default + calculateLosses flags packed
                 if (parts.size() >= 9) {
                     int flags = parts[8].toInt();
                     blk.isExternal = (flags & 1) != 0;
                     blk.isDefault = (flags & 2) != 0;
+                    blk.calculateLosses = (flags & 4) != 0;
                 }
 
+                // Fields 9-10 were lamThickness/stackingFactor in earlier versions;
+                // now these live on the material.  Skip them but keep parsing
+                // to find the correct quotedStart for name/magDirFctn.
+
                 // optional quoted strings: magDirFctn and/or name
-                if (parts.size() >= 10) {
+                // Find the first field that starts with a quote
+                int quotedStart = 9; // default (old format)
+                if (parts.size() >= 10 && !parts[9].startsWith('"'))
+                    quotedStart = 11; // new format with lamThickness/stackingFactor
+
+                if (parts.size() > quotedStart) {
                     QString remainder;
-                    for (int p = 9; p < parts.size(); p++) {
+                    for (int p = quotedStart; p < parts.size(); p++) {
                         if (!remainder.isEmpty()) remainder += ' ';
                         remainder += parts[p];
                     }
@@ -612,6 +648,21 @@ bool FemmeDocument::saveToFile(const QString &path)
         for (const auto &bh : mp.bhData) {
             out << "      " << bh.first << "\t" << bh.second << "\n";
         }
+        // Steinmetz iron loss coefficients (only write if any are set)
+        if (mp.Kh != 0.0 || mp.Kc != 0.0 || mp.Ke != 0.0) {
+            out << "    <Kh> = " << mp.Kh << "\n";
+            out << "    <Kc> = " << mp.Kc << "\n";
+            out << "    <Ke> = " << mp.Ke << "\n";
+            out << "    <alpha_loss> = " << mp.alpha_loss << "\n";
+        }
+        if (mp.density != 0.0)
+            out << "    <density> = " << mp.density << "\n";
+        if (!mp.coreLossData.empty()) {
+            out << "    <CoreLossPoints> = " << (int)mp.coreLossData.size() << "\n";
+            for (const auto &cl : mp.coreLossData) {
+                out << "      " << cl.B << "\t" << cl.freq << "\t" << cl.loss_Wkg << "\n";
+            }
+        }
         out << "  <EndBlock>\n";
     }
 
@@ -711,8 +762,13 @@ bool FemmeDocument::saveToFile(const QString &path)
         out << "\t" << blk.inGroup;
         out << "\t" << blk.turns;
 
-        int flags = (blk.isExternal ? 1 : 0) | (blk.isDefault ? 2 : 0);
+        int flags = (blk.isExternal ? 1 : 0) | (blk.isDefault ? 2 : 0)
+                  | (blk.calculateLosses ? 4 : 0);
         out << "\t" << flags;
+
+        // Reserved fields (were lamThickness/stackingFactor, now on material)
+        out << "\t" << 0;
+        out << "\t" << 0;
 
         // Write magDirFctn if set, or as empty "" placeholder if name follows
         if (!blk.magDirFctn.isEmpty() || !blk.name.isEmpty())
@@ -950,6 +1006,9 @@ void FemmeDocument::rotateSelected(double cx, double cy, double angleDeg)
             blk.y = cy + rx * sinA + ry * cosA;
             // Rotate magnetization direction so magnets stay correctly oriented
             blk.magDir += angleDeg;
+            // Normalize to [0, 360)
+            blk.magDir = std::fmod(blk.magDir, 360.0);
+            if (blk.magDir < 0) blk.magDir += 360.0;
         }
     }
     isModified = true;

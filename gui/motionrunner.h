@@ -13,6 +13,8 @@
 #include "femm_types.h"
 #include "meshgen.h"
 #include "resultsdoc.h"
+#include "bhistory.h"
+#include "ironloss.h"
 #include "dialogs/motiondialog.h"
 #include "motoroptimizer.h"
 
@@ -41,6 +43,12 @@ public:
 
     void abort();
     bool isRunning() const { return m_running; }
+    bool hasIronLossResult() const { return m_ironLossResult.valid; }
+    const IronLossResult &ironLossResult() const { return m_ironLossResult; }
+
+    // Take ownership of the last step's ResultsDocument (with iron loss data).
+    // Returns nullptr if no results or already taken. Caller owns the pointer.
+    ResultsDocument *takeLastResults();
 
 signals:
     void stepCompleted(int step, int total);
@@ -61,6 +69,11 @@ private:
     bool m_running = false;
     bool m_aborting = false;
     int m_currentStep = 0;
+
+    // Cached phase currents for current step (stored here so they're
+    // available when the async solve completes and StepResult is built)
+    double m_stepElecAngle = 0.0;
+    double m_stepIa = 0.0, m_stepIb = 0.0, m_stepIc = 0.0;
 
     MotionConfig m_config;
     FemmeDocument *m_doc = nullptr;
@@ -118,8 +131,19 @@ private:
         ResultsSummary summary;
         double instantTorque = 0.0;     // from probe solve (motor mode)
         bool hasTorque = false;
+        double elecAngleDeg = 0.0;      // electrical angle used for this step
+        double Ia = 0.0, Ib = 0.0, Ic = 0.0;  // phase currents (A peak)
     };
     std::vector<StepResult> m_results;
+
+    // B-field history for iron loss computation (one snapshot per step)
+    std::vector<BSnapshot> m_bHistory;
+
+    // Iron loss computation result (populated after sweep completes)
+    IronLossResult m_ironLossResult;
+
+    // Last step's ResultsDocument (saved for post-sweep overlay with iron loss data)
+    ResultsDocument *m_lastResultsDoc = nullptr;
 
     // Timestamp for unique output filenames (set once per sweep)
     QString m_timestamp;

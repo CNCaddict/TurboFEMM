@@ -28,6 +28,17 @@ public:
     void setNumContours(int n) { m_numContours = n; }
     void setAAQuality(AAQuality q) { m_aaQuality = q; }
 
+    // Manual color scale range override
+    void setScaleRange(double lo, double hi) { m_scaleMin = lo; m_scaleMax = hi; }
+    void setAutoScale(bool on) { m_autoScale = on; }
+    bool autoScale() const { return m_autoScale; }
+    double scaleMin() const { return m_scaleMin; }
+    double scaleMax() const { return m_scaleMax; }
+
+    // Compute percentile-based bounds from current data (clips outliers)
+    // Returns {low, high} at the given percentile (e.g. 0.95 = 95th percentile)
+    std::pair<double, double> computePercentileBounds(double percentile = 0.95) const;
+
     DensityType densityType() const { return m_densityType; }
     bool showContours() const { return m_showContours; }
     bool showMesh() const { return m_showMesh; }
@@ -71,6 +82,14 @@ private:
     uint32_t *m_px = nullptr;
     int m_stride = 0;
     uint32_t m_colorLut[kNumColors];
+
+    // Manual scale range (used when m_autoScale is false)
+    bool m_autoScale = true;
+    double m_scaleMin = 0.0;
+    double m_scaleMax = 1.0;
+
+    // Cached per-element iron loss value for getVertexValue()
+    mutable double m_cachedIronLoss = 0.0;
 
     // 2x SSAA buffer (High quality mode)
     QImage m_ssaaImage;

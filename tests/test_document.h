@@ -31,6 +31,26 @@ private slots:
 
     // Property lookup
     void propertyIndexLookup();
+
+    // Steinmetz iron loss serialization
+    void steinmetzRoundTrip();
+    void blockLabelLossRoundTrip();
+    void backwardCompatNoLossFields();
+
+    // B-field history spatial index
+    void bHistoryIndexLookup();
+    void bHistoryIndexEmpty();
+
+    // Iron loss computation
+    void steinmetzLossFormula();
+    void ironLossFromBHistory();
+    void rotorLossInverseTransform();
+    void conductiveEddyLossAutoCompute();
+    void azBasedSolidConductorLoss();
+    void steinmetzM19at60Hz();
+
+    // 3-phase commutation
+    void threePhaseCommutationTracking();
 };
 
 #endif // TEST_DOCUMENT_H

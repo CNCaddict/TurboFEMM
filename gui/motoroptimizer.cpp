@@ -148,7 +148,14 @@ static bool sweepDirection(
 
         if (energies.size() >= 2) {
             int i = (int)energies.size() - 1;
-            double torque = -(energies[i] - energies[i - 1]) / dTheta_rad;
+            // NOTE: We sweep the *stator* electrical angle at fixed rotor.
+            // Increasing stator angle toward the "attracting" direction
+            // *decreases* stored energy.  Physical rotor torque (from MST)
+            // is T = -dW/dθ_mech, but here dθ is the stator angle, so the
+            // sign is inverted: positive dE/dθ_stator corresponds to
+            // positive physical torque.  Use +dE/dθ (no minus sign) so
+            // the optimizer finds the angle of maximum *positive* torque.
+            double torque = (energies[i] - energies[i - 1]) / dTheta_rad;
 
             if (progressCallback) {
                 if (!progressCallback(stepOffset + step, angle, torque)) {
@@ -157,10 +164,14 @@ static bool sweepDirection(
                 }
             }
 
-            // Check if torque decreased (we passed the peak)
+            // Check if torque decreased (we passed the peak).
+            // Only accept peaks where the torque is POSITIVE — a peak
+            // in the negative region corresponds to maximum braking
+            // torque, not motoring.  Skip those and keep sweeping until
+            // we find the positive (motoring) peak.
             if (energies.size() >= 3) {
-                double prevTorque = -(energies[i - 1] - energies[i - 2]) / dTheta_rad;
-                if (torque < prevTorque) {
+                double prevTorque = (energies[i - 1] - energies[i - 2]) / dTheta_rad;
+                if (torque < prevTorque && prevTorque > 0.0) {
                     outOptimalAngle = angles[i - 1];
                     return true;
                 }

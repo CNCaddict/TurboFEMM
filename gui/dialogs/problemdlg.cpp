@@ -30,6 +30,9 @@ ProblemDialog::ProblemDialog(FemmeDocument *doc, QWidget *parent)
     m_probType->addItem(tr("Planar"));
     m_probType->addItem(tr("Axisymmetric"));
     m_probType->setCurrentIndex(static_cast<int>(doc->problemType));
+    m_probType->setToolTip(tr("Planar: 2D cross-section with uniform depth (XY plane).\n"
+                               "Axisymmetric: 2D cross-section revolved around the Y axis.\n"
+                               "Most motors use Planar. Solenoids/actuators use Axisymmetric."));
     typeLayout->addRow(tr("Problem type:"), m_probType);
 
     m_lengthUnits = new QComboBox;
@@ -40,6 +43,9 @@ ProblemDialog::ProblemDialog(FemmeDocument *doc, QWidget *parent)
     m_lengthUnits->addItem(tr("Mils"));
     m_lengthUnits->addItem(tr("Microns"));
     m_lengthUnits->setCurrentIndex(static_cast<int>(doc->lengthUnits));
+    m_lengthUnits->setToolTip(tr("Units for all geometric coordinates and dimensions.\n"
+                                  "Also determines the Depth unit (planar problems).\n"
+                                  "Most motor models use Millimeters."));
     typeLayout->addRow(tr("Length units:"), m_lengthUnits);
 
     m_frequency = new QDoubleSpinBox;
@@ -47,13 +53,19 @@ ProblemDialog::ProblemDialog(FemmeDocument *doc, QWidget *parent)
     m_frequency->setDecimals(4);
     m_frequency->setSuffix(tr(" Hz"));
     m_frequency->setValue(doc->frequency);
+    m_frequency->setToolTip(tr("Excitation frequency for AC (harmonic) problems.\n"
+                                "Set to 0 for DC / magnetostatic analysis.\n"
+                                "Non-zero enables eddy current and skin effects."));
     typeLayout->addRow(tr("Frequency:"), m_frequency);
 
     m_depth = new QDoubleSpinBox;
     m_depth->setRange(0.0, 1e12);
     m_depth->setDecimals(6);
     m_depth->setValue(doc->depth);
-    m_depth->setToolTip(tr("Depth of the problem (planar only)"));
+    m_depth->setToolTip(tr("Stack length (out-of-plane depth) for planar problems.\n"
+                            "In the same units as Length Units above.\n"
+                            "Example: 15 mm motor stack = 15 (if units are mm).\n"
+                            "Affects computed force, torque, energy, and losses."));
     m_depth->setEnabled(doc->problemType == ProblemType::Planar);
     typeLayout->addRow(tr("Depth:"), m_depth);
 
@@ -67,7 +79,10 @@ ProblemDialog::ProblemDialog(FemmeDocument *doc, QWidget *parent)
     m_precision->setRange(1e-16, 1e-1);
     m_precision->setDecimals(16);
     m_precision->setValue(doc->precision);
-    m_precision->setToolTip(tr("Solver convergence tolerance (e.g. 1e-8)"));
+    m_precision->setToolTip(tr("Solver convergence tolerance for the linear system.\n"
+                                "Smaller = more accurate but slower.\n"
+                                "1e-8 is good for most problems.\n"
+                                "Use 1e-10 for high-precision force/torque."));
     solverLayout->addRow(tr("Precision:"), m_precision);
 
     m_minAngle = new QDoubleSpinBox;
@@ -75,19 +90,28 @@ ProblemDialog::ProblemDialog(FemmeDocument *doc, QWidget *parent)
     m_minAngle->setDecimals(1);
     m_minAngle->setSuffix(tr(" deg"));
     m_minAngle->setValue(doc->minAngle);
-    m_minAngle->setToolTip(tr("Minimum angle for mesh triangles"));
+    m_minAngle->setToolTip(tr("Minimum interior angle for mesh triangles.\n"
+                               "Higher = better quality elements but more nodes.\n"
+                               "30 deg is the practical maximum (equilateral).\n"
+                               "Default ~30 deg gives good quality meshes."));
     solverLayout->addRow(tr("Min mesh angle:"), m_minAngle);
 
     m_smartMesh = new QComboBox;
     m_smartMesh->addItem(tr("Off"));
     m_smartMesh->addItem(tr("On"));
     m_smartMesh->setCurrentIndex(doc->smartMesh ? 1 : 0);
+    m_smartMesh->setToolTip(tr("Smart mesh automatically refines near corners,\n"
+                                "boundaries, and high-gradient regions.\n"
+                                "Recommended: On for most problems."));
     solverLayout->addRow(tr("Smart mesh:"), m_smartMesh);
 
     m_acSolver = new QComboBox;
     m_acSolver->addItem(tr("Successive Approximation"));
     m_acSolver->addItem(tr("Newton"));
     m_acSolver->setCurrentIndex(doc->acSolver);
+    m_acSolver->setToolTip(tr("Nonlinear iteration method for AC problems.\n"
+                               "Successive Approximation: robust, slower convergence.\n"
+                               "Newton: faster but may not converge for some problems."));
     solverLayout->addRow(tr("AC solver:"), m_acSolver);
 
     mainLayout->addWidget(solverGroup);
@@ -101,10 +125,16 @@ ProblemDialog::ProblemDialog(FemmeDocument *doc, QWidget *parent)
     m_prevType->addItem(tr("Incremental Permeability"));
     m_prevType->addItem(tr("Frozen Permeability"));
     m_prevType->setCurrentIndex(doc->prevType);
+    m_prevType->setToolTip(tr("Use a previous solution to linearize nonlinear materials.\n"
+                               "None: standard nonlinear solve (default).\n"
+                               "Incremental Permeability: linearize around previous B.\n"
+                               "Frozen Permeability: use previous permeability as-is."));
     prevLayout->addRow(tr("Type:"), m_prevType);
 
     m_prevSoln = new QLineEdit(doc->prevSoln);
     m_prevSoln->setPlaceholderText(tr("Path to previous .ans file"));
+    m_prevSoln->setToolTip(tr("Path to the .ans results file from a previous solve.\n"
+                               "Required for Incremental or Frozen Permeability modes."));
     prevLayout->addRow(tr("Solution file:"), m_prevSoln);
 
     mainLayout->addWidget(prevGroup);
