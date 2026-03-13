@@ -30,6 +30,11 @@ IMPROVEMENTS:
     energy, MST torque)
 
 BUG FIXES:
+  - Fixed GPU PCG solver divergence on fine meshes (>80k nodes): automatic
+    fallback to CPU double-precision PCG when float32 GPU solver produces
+    NaN or stalls
+  - Unified "Analyze" button to use in-process solver (same as motion sweep),
+    eliminating external fkn process and disk I/O
   - Fixed motor optimizer finding braking angle instead of motoring angle
     (peak detection now requires positive torque)
   - Fixed commutation tracking sign (subtract rotor advance, not add)

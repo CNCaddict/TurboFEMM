@@ -438,13 +438,11 @@ int CBigLinProb::PCGSolve(int flag)
 #ifdef FEMM_USE_METAL
 	// ============================================================
 	// GPU-accelerated PCG via Metal (Apple Silicon)
-	// All vectors reside in GPU shared memory. Only scalar
-	// dot-product results cross GPU→CPU each iteration.
-	//
-	// Batch mode: operations between dot() calls are encoded into
-	// a single Metal command buffer, reducing GPU-CPU sync points
-	// from ~8 per iteration to 2 (one per dot product readback).
+	// Uses float32 for speed.  Falls back to CPU double-precision
+	// path if the GPU solver diverges or stalls (can happen with
+	// very fine meshes where float32 precision is insufficient).
 	// ============================================================
+	bool gpuSolveOk = false;
 	if(n >= 1000)  // GPU overhead only worthwhile for larger problems
 	{
 		// Use persistent GPU backend if available (saves ~15ms pipeline init)
@@ -458,8 +456,6 @@ int CBigLinProb::PCGSolve(int flag)
 		}
 #ifndef _WIN32
 		pcg_t1 = pcg_wallclock_ms();
-		// fprintf(stderr, "[fkn]   GPU create: %.1f ms%s\n", pcg_t1-pcg_t0,
-		//		externalGPU ? " (reused)" : "");
 		pcg_t0 = pcg_t1;
 #endif
 		if(gpu)
@@ -498,20 +494,16 @@ int CBigLinProb::PCGSolve(int flag)
 			res = gpu->dot(Z, R);             // flush + read
 
 			// PCG iteration loop — batched GPU operations
-			// Each iteration: 2 GPU-CPU syncs (at the two dot() calls)
-			// instead of 8 syncs without batching.
 			int maxPcgIter = (n > 10000) ? n : 10 * n;
 			if (maxPcgIter < 1000) maxPcgIter = 1000;
 			int pcgIter = 0;
+			bool gpuDiverged = false;
 
 			do{
-				// Phase A: spmv + dot → 1 sync
-				// (scal+axpy from previous iteration are still batched here)
 				gpu->spmv(P, U);           // U = A * P  (batched)
 				pAp = gpu->dot(P, U);      // flush + read pAp
 				del = res / pAp;
 
-				// Phase B: axpy + axpy + precond + dot → 1 sync
 				gpu->axpy(del, P, V);      // V += del * P  (batched)
 				gpu->axpy(-del, U, R);     // R -= del * U  (batched)
 				gpu->precondJacobi(R, Z);  // Z = M^{-1} * R  (batched)
@@ -519,21 +511,18 @@ int CBigLinProb::PCGSolve(int flag)
 				rho = res_new / res;
 				res = res_new;
 
-				// These are batched and will execute at the start of
-				// the next iteration's Phase A (before spmv+dot).
 				gpu->scal(rho, P);         // P *= rho  (batched)
 				gpu->axpy(1.0, Z, P);      // P += Z    (batched)
 
 				er = sqrt(res / res_o);
 				pcgIter++;
 
-				// NaN / divergence detection — bail out immediately
+				// NaN / divergence detection
 				if (er != er || er > 1e10) {
-					fprintf(stderr, "[fkn] GPU PCG diverged at iter %d: er=%g (n=%d)\n",
+					fprintf(stderr, "[fkn] GPU PCG diverged at iter %d: er=%g (n=%d) — will retry on CPU\n",
 							pcgIter, er, n);
-					gpu->endBatch();
-					gpu->downloadSolution(n, V);
-					return 0;
+					gpuDiverged = true;
+					break;
 				}
 
 				prg2 = (int)(20. * log10(er) / (log10(Precision)));
@@ -549,28 +538,23 @@ int CBigLinProb::PCGSolve(int flag)
 
 			gpu->endBatch();
 
-			// Check if solver stalled without converging
-			if (er > Precision) {
-				fprintf(stderr, "[fkn] GPU PCG stalled: er=%g after %d/%d iters (n=%d, prec=%g)\n",
-						er, pcgIter, maxPcgIter, n, Precision);
+			if (!gpuDiverged && er <= Precision) {
+				// GPU converged successfully
 				gpu->downloadSolution(n, V);
-				return 0;
+				gpuSolveOk = true;
+			} else if (!gpuDiverged) {
+				fprintf(stderr, "[fkn] GPU PCG stalled: er=%g after %d/%d iters (n=%d) — will retry on CPU\n",
+						er, pcgIter, maxPcgIter, n);
 			}
-
-#ifndef _WIN32
-			pcg_t1 = pcg_wallclock_ms();
-			// fprintf(stderr, "[fkn]   GPU PCG solve: %.1f ms (%d iters, n=%d)\n",
-			//		pcg_t1-pcg_t0, pcgIter, n);
-#endif
-			// Download solution back to CPU
-			gpu->downloadSolution(n, V);
-			return 1;
+			// If !gpuSolveOk, fall through to CPU path below
 		}
 	}
+	if (gpuSolveOk) return 1;
 #endif // FEMM_USE_METAL
 
 	// ============================================================
-	// CPU PCG path (BLAS-accelerated when available)
+	// CPU PCG path (double precision — BLAS-accelerated when available)
+	// Also serves as fallback when GPU float32 PCG diverges.
 	// ============================================================
 
 	// initialize progress bar;

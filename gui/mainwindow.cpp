@@ -17,6 +17,7 @@
 #include "motionrunner.h"
 #include "motoroptimizer.h"
 #include "dxfimporter.h"
+#include "inprocesssolver.h"
 
 #include <QMenuBar>
 #include <QProgressDialog>
@@ -1257,53 +1258,79 @@ void MainWindow::onAnalyze()
         if (!doc->hasMesh) return;
     }
 
-    if (m_solver->isRunning()) {
-        updateStatus(tr("Solver is already running."));
-        return;
-    }
-
-    // Auto-save .fem file — the solver re-reads it
-    if (doc->isModified || !doc->filePath().isEmpty()) {
-        if (!doc->saveToFile(doc->filePath())) {
-            QMessageBox::warning(this, tr("Error"),
-                tr("Could not save file before analysis."));
-            return;
-        }
-    }
-
-    // Ensure mesh files (.node, .ele, .pbc) exist on disk.
-    // After adaptive refinement the mesh lives only in memory
-    // (generateMeshInProcess doesn't write files), so the external
-    // fkn solver would fail with "problem loading mesh" (exit code 2).
-    fprintf(stderr, "[ANALYZE] Writing mesh files: %d nodes, %d elements, path=%s\n",
-            (int)doc->meshNodes.size(), (int)doc->meshElements.size(),
-            doc->filePath().toUtf8().constData());
-    if (!m_meshGen->writeMeshFiles(doc)) {
-        QMessageBox::warning(this, tr("Error"),
-            tr("Could not write mesh files: %1").arg(m_meshGen->lastError()));
-        return;
-    }
-    // Verify mesh files actually exist on disk
-    {
-        QString base = doc->filePath();
-        if (base.endsWith(".fem", Qt::CaseInsensitive)) base.chop(4);
-        QStringList needed = { base + ".node", base + ".ele", base + ".pbc" };
-        for (const auto &f : needed) {
-            QFileInfo fi(f);
-            fprintf(stderr, "[ANALYZE] %s: exists=%d size=%lld\n",
-                    f.toUtf8().constData(), fi.exists(), fi.size());
-        }
-    }
-    fprintf(stderr, "[ANALYZE] Mesh files written successfully\n");
-
-    // Track for auto-overlay after solve
     DrawingWidget *dw = currentDrawing();
-    if (dw) {
-        m_autoSolvePending = true;
-        m_autoSolveTarget = dw;
+
+    // Auto-save .fem file (keeps file on disk in sync)
+    if (!doc->filePath().isEmpty() && doc->isModified) {
+        doc->saveToFile(doc->filePath());
     }
 
-    m_solver->runSolver(doc);
+    updateStatus(tr("Solving (%1 elements)...")
+        .arg(doc->meshElements.size()));
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QApplication::processEvents();
+
+    // Use in-process solver — same GPU-accelerated path as motion sweep,
+    // no file I/O, no external process.  Reuses existing mesh in memory.
+    InProcessSolver solver;
+    connect(&solver, &InProcessSolver::progress, this, [this](const QString &msg) {
+        updateStatus(msg);
+        QApplication::processEvents();
+    });
+
+    auto *rdoc = new ResultsDocument(this);
+    bool ok = solver.solveExistingMesh(doc, doc->meshEdges, rdoc);
+
+    QApplication::restoreOverrideCursor();
+
+    if (!ok) {
+        delete rdoc;
+        QMessageBox::warning(this, tr("Solver Error"), solver.lastError());
+        updateStatus(tr("Analysis failed: %1").arg(solver.lastError()));
+        return;
+    }
+
+    // Set up overlay directly from in-memory results (no .ans file needed)
+    delete m_overlayRenderer;
+    m_overlayRenderer = nullptr;
+    delete m_overlayDoc;
+    m_overlayDoc = rdoc;
+
+    m_overlayRenderer = new ResultsOverlayRenderer();
+    m_overlayRenderer->setDocument(m_overlayDoc);
+    m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
+    m_overlayRenderer->setShowContours(m_savedOverlayContours);
+    m_overlayRenderer->setShowLegend(m_savedOverlayLegend);
+    m_overlayRenderer->setShowMesh(m_savedOverlayMesh);
+
+    QAction *checkedAA = m_aaGroup->checkedAction();
+    if (checkedAA)
+        m_overlayRenderer->setAAQuality(static_cast<AAQuality>(checkedAA->data().toInt()));
+
+    if (dw) {
+        dw->setResultsOverlay(m_overlayRenderer);
+
+        // Apply manual color scale if set
+        if (m_scaleAutoCheck && !m_scaleAutoCheck->isChecked()) {
+            m_overlayRenderer->setScaleRange(m_scaleMinSpin->value(),
+                                              m_scaleMaxSpin->value());
+        }
+    }
+
+    // Enable overlay toggle actions
+    m_densityMenu->setEnabled(true);
+    for (QAction *a : m_densityGroup->actions()) {
+        a->blockSignals(true);
+        a->setChecked(a->data().toInt() == m_savedDensityType);
+        a->blockSignals(false);
+    }
+    actOverlayContours->blockSignals(true);
+    actOverlayContours->setEnabled(true);
+    actOverlayContours->setChecked(m_savedOverlayContours);
+    actOverlayContours->blockSignals(false);
+
+    updateStatus(tr("Analysis complete. %1 elements solved.")
+        .arg(rdoc->elements.size()));
 }
 
 void MainWindow::onSolverFinished(bool success)
