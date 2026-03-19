@@ -5,10 +5,6 @@ Version 4.3.2 (2026-03-19)
 ---------------------------
 
 NEW FEATURES:
-  - Sliding band mesh optimization for motion sweeps: meshes once, then
-    only re-triangulates a thin airgap strip each step. Automatic airgap
-    detection for inner and outer rotor motors. Dashed cyan interface
-    circles shown in mesh view.
   - Az-based eddy current loss model for solid low-mu conductors (magnets)
     with per-block mean subtraction to cancel gauge/motion artifacts
   - Rotor-frame solid loss computation: rotates sampled B into the local
@@ -38,10 +34,8 @@ BUG FIXES:
   - Fixed duplicate iron-loss stills being written into motion PNG output
   - Fixed offscreen GIF quantization artifacts by using per-frame local
     palettes instead of one coarse global palette
-  - Removed stale sliding-band controls/guide artifacts from the normal
-    GUI workflow while the feature remains disabled in the Problem dialog
-  - Fixed slidingBandManualRadiiPreserved test to use auto-detected radii
-    after sliding band metadata was removed from .fem file saves
+  - Removed sliding band feature (was not working reliably) and cleaned
+    up associated UI controls and .fem file metadata
 
 Version 4.3.1 (2026-03-17)
 ---------------------------
@@ -87,10 +81,6 @@ NEW FEATURES:
   - H-adaptive mesh refinement (ZZ error estimator, two-phase refine/coarsen)
   - Metal GPU-accelerated PCG solver backend (macOS)
   - In-process solver (no disk I/O for intermediate results)
-  - Sliding band mesh optimization for motion sweeps: meshes once, then
-    only re-triangulates a thin airgap strip each step (no Triangle calls
-    after step 0). Automatic airgap detection for inner and outer rotor
-    motors. Dashed cyan interface circles shown in mesh view.
   - Comprehensive UI tooltips on all dialog parameters
 
 IMPROVEMENTS:
