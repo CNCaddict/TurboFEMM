@@ -11,7 +11,7 @@
 #include <QDateTime>
 #include <vector>
 #include "femm_types.h"
-#include "meshgen.h"
+#include "meshgen.h"  // MeshEdge, SlidingBand
 #include "resultsdoc.h"
 #include "bhistory.h"
 #include "ironloss.h"
@@ -62,9 +62,11 @@ private slots:
 private:
     void runNextStep();
     QPixmap captureFrame();
+    QPixmap renderFrameForDensity(DensityType density, bool forceLegend = false);
     void writeCSV();
     void assembleGIF();
     void restoreGeometry();
+    void syncGeometryToStep(int step);
 
     bool m_running = false;
     bool m_aborting = false;
@@ -117,6 +119,12 @@ private:
     // Captured frames for GIF assembly
     std::vector<QImage> m_frames;
 
+    // Lock the captured |B| movie to one scale across all steps so the GIF
+    // does not visually "jump" just because autoscale recomputed.
+    bool m_captureScaleInitialized = false;
+    double m_captureScaleMin = 0.0;
+    double m_captureScaleMax = 1.0;
+
     // Deferred PNG frames (written to disk at end of run, not per-step)
     struct DeferredFrame {
         QPixmap pixmap;
@@ -133,8 +141,16 @@ private:
         bool hasTorque = false;
         double elecAngleDeg = 0.0;      // electrical angle used for this step
         double Ia = 0.0, Ib = 0.0, Ic = 0.0;  // phase currents (A peak)
+        double rotorProbeBr = 0.0;      // signed radial B at fixed rotor-frame probe
+        double rotorProbeBt = 0.0;      // signed tangential B at fixed rotor-frame probe
+        bool hasRotorProbe = false;
     };
     std::vector<StepResult> m_results;
+
+    bool m_rotorProbeValid = false;
+    int m_rotorProbeLabelIndex = -1;
+    double m_rotorProbeRadius = 0.0;
+    double m_rotorProbeTheta0Deg = 0.0;
 
     // B-field history for iron loss computation (one snapshot per step)
     std::vector<BSnapshot> m_bHistory;
@@ -150,6 +166,11 @@ private:
 
     // Solver connection management
     QMetaObject::Connection m_solverConn;
+
+    // Sliding band mesh optimisation — avoids full remesh per step
+    bool m_useSlidingBand = false;
+    SlidingBand m_slidingBand;
+    std::vector<MeshEdge> m_slidingBandEdges;  // assembled edges for solveExistingMesh
 };
 
 #endif // MOTIONRUNNER_H

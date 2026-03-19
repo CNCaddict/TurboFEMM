@@ -8,6 +8,7 @@
 
 class FemmeDocument;
 class ResultsOverlayRenderer;
+struct SlidingBand;
 
 class DrawingWidget : public QWidget
 {
@@ -38,8 +39,13 @@ public:
     void setViewLocked(bool locked) { m_viewLocked = locked; }
     bool isViewLocked() const { return m_viewLocked; }
 
+    // Render the current view directly to an offscreen pixmap, ignoring any
+    // cached sweep frame so callers always get the live overlay + geometry.
+    QPixmap renderLiveFrame();
+
     // Results overlay
     void setResultsOverlay(ResultsOverlayRenderer *overlay);
+    void setSlidingBand(const SlidingBand *band) { m_slidingBand = band; }
     ResultsOverlayRenderer *resultsOverlay() const { return m_overlay; }
 
     // Cached frame — during motion sweep the widget paints this pixmap
@@ -86,6 +92,7 @@ private:
     void screenToDrawing(int xs, int ys, double &xd, double &yd) const;
 
     // Drawing helpers
+    void paintScene(QPainter &p, bool allowCachedFrame);
     void drawGrid(QPainter &p);
     void drawOrigin(QPainter &p);
     void drawNodes(QPainter &p);
@@ -93,7 +100,6 @@ private:
     void drawArcSegments(QPainter &p);
     void drawBlockLabels(QPainter &p);
     void drawMesh(QPainter &p);
-
     // Editing
     void deleteSelected();
 
@@ -144,6 +150,9 @@ private:
 
     // Results overlay (non-owning pointer, managed by MainWindow)
     ResultsOverlayRenderer *m_overlay = nullptr;
+
+    // Sliding band interface circles (non-owning, set during motion sweep)
+    const SlidingBand *m_slidingBand = nullptr;
 
     // Cached frame for motion sweep (null when not in use)
     QPixmap m_cachedFrame;

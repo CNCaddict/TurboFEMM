@@ -33,11 +33,15 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QDebug>
 #include <QThread>
 #include <QEventLoop>
 #include <QTimer>
+#include <QRegularExpression>
 #include <QScrollBar>
+#include <QStandardPaths>
+#include <QTextCursor>
 #include <QTime>
 #include <cstdio>
 
@@ -53,6 +57,141 @@ protected:
         success = refiner->run(doc, config);
     }
 };
+
+namespace {
+
+bool densityTypeSupported(const ResultsDocument *doc, DensityType type)
+{
+    switch (type) {
+    case DensityType::None:
+    case DensityType::B_mag:
+    case DensityType::H_mag:
+        return true;
+    case DensityType::B_real:
+    case DensityType::B_imag:
+        return doc && doc->frequency > 0.0;
+    case DensityType::IronLoss:
+        return doc && !doc->ironLoss_Wkg.empty();
+    case DensityType::J_mag:
+        return false;
+    }
+    return false;
+}
+
+bool densityTypeVisible(const ResultsDocument *doc, DensityType type)
+{
+    switch (type) {
+    case DensityType::IronLoss:
+        return true;
+    case DensityType::B_real:
+    case DensityType::B_imag:
+        return doc && doc->frequency > 0.0;
+    case DensityType::J_mag:
+        return false;
+    default:
+        return true;
+    }
+}
+
+bool documentMeshLooksReusable(const FemmeDocument *doc)
+{
+    if (!doc || !doc->hasMesh)
+        return false;
+    if (doc->meshNodes.empty() || doc->meshElements.empty() || doc->meshEdges.empty())
+        return false;
+
+    const int numNodes = (int)doc->meshNodes.size();
+    const int numLabels = (int)doc->blockLabels.size();
+    if (numLabels <= 0)
+        return false;
+
+    for (const auto &elm : doc->meshElements) {
+        for (int j = 0; j < 3; j++) {
+            if (elm.p[j] < 0 || elm.p[j] >= numNodes)
+                return false;
+        }
+        // Triangle region attributes are stored as 1-based block-label IDs.
+        if (elm.label < 1 || elm.label > numLabels)
+            return false;
+    }
+
+    for (const auto &edge : doc->meshEdges) {
+        if (edge.n0 < 0 || edge.n0 >= numNodes || edge.n1 < 0 || edge.n1 >= numNodes)
+            return false;
+    }
+
+    return true;
+}
+
+DensityType normalizeDensityType(const ResultsDocument *doc, int savedType)
+{
+    DensityType type = static_cast<DensityType>(savedType);
+    if (densityTypeSupported(doc, type))
+        return type;
+    return DensityType::B_mag;
+}
+
+void syncDensityMenuSelection(QActionGroup *group, ResultsDocument *doc, int &savedType)
+{
+    if (!group) return;
+
+    DensityType normalized = normalizeDensityType(doc, savedType);
+    savedType = (int)normalized;
+
+    QSignalBlocker blocker(group);
+    bool wasExclusive = group->isExclusive();
+    group->setExclusive(false);
+
+    QAction *selected = nullptr;
+    for (QAction *action : group->actions()) {
+        DensityType type = static_cast<DensityType>(action->data().toInt());
+        bool supported = densityTypeSupported(doc, type);
+        action->setVisible(densityTypeVisible(doc, type));
+        action->setEnabled(supported);
+        bool checked = supported && type == normalized;
+        action->setChecked(checked);
+        if (checked)
+            selected = action;
+    }
+
+    if (!selected) {
+        for (QAction *action : group->actions()) {
+            if (action->isEnabled()) {
+                action->setChecked(true);
+                break;
+            }
+        }
+    }
+
+    group->setExclusive(wasExclusive);
+}
+
+QString sanitizedDialogDirectory(const QString &candidate)
+{
+#ifdef Q_OS_MAC
+    if (!candidate.isEmpty()) {
+        const QString clean = QFileInfo(candidate).absoluteFilePath();
+        const QString desktop = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+        const QString documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        const QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        const QStringList protectedRoots = {desktop, documents, downloads};
+
+        for (const QString &root : protectedRoots) {
+            if (root.isEmpty()) continue;
+            if (clean == root || clean.startsWith(root + QDir::separator()))
+                return QDir::homePath();
+        }
+
+        return clean;
+    }
+#endif
+
+    if (!candidate.isEmpty())
+        return candidate;
+    return QDir::homePath();
+}
+
+}  // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -94,6 +233,8 @@ MainWindow::MainWindow(QWidget *parent)
     // Restore persistent view settings
     QSettings settings;
     m_savedDensityType = settings.value("view/densityType", (int)DensityType::B_mag).toInt();
+    if (static_cast<DensityType>(m_savedDensityType) == DensityType::J_mag)
+        m_savedDensityType = (int)DensityType::B_mag;
     m_savedOverlayContours = settings.value("view/overlayContours", true).toBool();
     m_savedOverlayMesh = settings.value("view/overlayMesh", false).toBool();
     m_savedOverlayLegend = settings.value("view/overlayLegend", true).toBool();
@@ -121,6 +262,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_logPanel->setVisible(logVisible);
     if (actShowLog) actShowLog->setChecked(logVisible);
     m_splitter->setSizes({height() - logHeight, logHeight});
+
+    if (m_densityMenu) {
+        m_densityMenu->setEnabled(true);
+        syncDensityMenuSelection(m_densityGroup, nullptr, m_savedDensityType);
+    }
 }
 
 MainWindow::~MainWindow()
@@ -209,7 +355,7 @@ void MainWindow::createMenus()
     viewMenu->addSeparator();
 
     m_densityMenu = viewMenu->addMenu(tr("&Density Plot"));
-    m_densityMenu->setEnabled(false);
+    m_densityMenu->setEnabled(true);
 
     m_densityGroup = new QActionGroup(this);
     m_densityGroup->setExclusive(true);
@@ -229,7 +375,6 @@ void MainWindow::createMenus()
     addDensityAction(tr("|&Re(B)|"),       DensityType::B_real);
     addDensityAction(tr("|&Im(B)|"),       DensityType::B_imag);
     addDensityAction(tr("|&H|"),           DensityType::H_mag);
-    addDensityAction(tr("|&J|"),           DensityType::J_mag);
     addDensityAction(tr("Iron &Loss"),     DensityType::IronLoss);
 
     actOverlayContours = viewMenu->addAction(tr("Overlay &Contours"));
@@ -477,13 +622,42 @@ void MainWindow::appendLog(const QString &msg)
 {
     if (!m_logPanel) return;
 
-    // Split multi-line messages and append each line with timestamp
     QString timestamp = QTime::currentTime().toString("HH:mm:ss");
     const QStringList lines = msg.split('\n', Qt::SkipEmptyParts);
     for (const QString &line : lines) {
         QString trimmed = line.trimmed();
-        if (!trimmed.isEmpty())
-            m_logPanel->appendPlainText(QString("[%1] %2").arg(timestamp, trimmed));
+        if (trimmed.isEmpty()) continue;
+
+        // Detect progress-percentage lines like "PCG: 45%" or
+        // "Nonlinear convergence: 12%".  Update the last line in-place
+        // instead of appending a new one, to avoid flooding the log.
+        static const QRegularExpression pctRe(
+            R"(^(.+?):\s*(\d+)%$)");
+        auto match = pctRe.match(trimmed);
+        if (match.hasMatch()) {
+            QString prefix = match.captured(1);  // e.g. "PCG"
+            if (prefix == m_lastLogPrefix) {
+                // Replace the last line in-place
+                QTextCursor cursor = m_logPanel->textCursor();
+                cursor.movePosition(QTextCursor::End);
+                cursor.movePosition(QTextCursor::StartOfBlock,
+                                    QTextCursor::KeepAnchor);
+                cursor.removeSelectedText();
+                cursor.insertText(QString("[%1] %2").arg(timestamp, trimmed));
+                // Auto-scroll
+                QScrollBar *sb = m_logPanel->verticalScrollBar();
+                sb->setValue(sb->maximum());
+                continue;
+            }
+            // New prefix — fall through to append as normal line
+            m_lastLogPrefix = prefix;
+        } else {
+            // Not a percentage line — clear the tracking so next percentage
+            // line starts a fresh entry
+            m_lastLogPrefix.clear();
+        }
+
+        m_logPanel->appendPlainText(QString("[%1] %2").arg(timestamp, trimmed));
     }
 
     // Auto-scroll to bottom
@@ -516,8 +690,27 @@ void MainWindow::toggleLogPanel(bool visible)
 DrawingWidget *MainWindow::currentDrawing()
 {
     QMdiSubWindow *sw = mdiArea->activeSubWindow();
-    if (!sw) return nullptr;
-    return qobject_cast<DrawingWidget *>(sw->widget());
+    if (sw) {
+        if (auto *dw = qobject_cast<DrawingWidget *>(sw->widget()))
+            return dw;
+    }
+
+    // If a non-drawing subwindow (or no subwindow) is currently active,
+    // fall back to the drawing that owns the current overlay.
+    const auto subs = mdiArea->subWindowList();
+    for (QMdiSubWindow *sub : subs) {
+        auto *dw = qobject_cast<DrawingWidget *>(sub->widget());
+        if (dw && m_overlayRenderer && dw->resultsOverlay() == m_overlayRenderer)
+            return dw;
+    }
+
+    // Final fallback: first available drawing tab.
+    for (QMdiSubWindow *sub : subs) {
+        if (auto *dw = qobject_cast<DrawingWidget *>(sub->widget()))
+            return dw;
+    }
+
+    return nullptr;
 }
 
 FemmeDocument *MainWindow::currentDocument()
@@ -559,7 +752,7 @@ void MainWindow::onOpenDocument()
     QString lastDir = settings.value("file/lastDirectory", QString()).toString();
 
     QString path = QFileDialog::getOpenFileName(
-        this, tr("Open FEMM File"), lastDir,
+        this, tr("Open FEMM File"), sanitizedDialogDirectory(lastDir),
         tr("FEMM Files (*.fem);;All Files (*)"));
     if (path.isEmpty()) return;
 
@@ -600,7 +793,7 @@ void MainWindow::openFile(const QString &path)
             m_overlayRenderer = nullptr;
             delete m_overlayDoc;
             m_overlayDoc = nullptr;
-            m_densityMenu->setEnabled(false);
+            syncDensityMenuSelection(m_densityGroup, nullptr, m_savedDensityType);
             actClearOverlay->setEnabled(false);
             actOverlayContours->setEnabled(false);
             actOverlayMesh->setEnabled(false);
@@ -677,7 +870,10 @@ void MainWindow::onSaveAs()
     if (!doc) return;
 
     QString path = QFileDialog::getSaveFileName(
-        this, tr("Save FEMM File"), QString(),
+        this, tr("Save FEMM File"),
+        sanitizedDialogDirectory(doc->filePath().isEmpty()
+                                 ? QString()
+                                 : QFileInfo(doc->filePath()).absolutePath()),
         tr("FEMM Files (*.fem);;All Files (*)"));
     if (path.isEmpty()) return;
 
@@ -708,7 +904,7 @@ void MainWindow::onImportDXF()
                        settings.value("file/lastDirectory", QString())).toString();
 
     QString path = QFileDialog::getOpenFileName(
-        this, tr("Import DXF File"), lastDir,
+        this, tr("Import DXF File"), sanitizedDialogDirectory(lastDir),
         tr("DXF Files (*.dxf);;All Files (*)"));
     if (path.isEmpty()) return;
 
@@ -772,6 +968,8 @@ void MainWindow::onProblemDef()
     ProblemDialog dlg(doc, this);
     if (dlg.exec() == QDialog::Accepted) {
         updateStatus(tr("Problem definition updated."));
+        if (auto *dw = currentDrawing())
+            dw->update();
     }
 }
 
@@ -1258,6 +1456,18 @@ void MainWindow::onAnalyze()
         if (!doc->hasMesh) return;
     }
 
+    // Motion sweeps can leave behind an in-memory mesh snapshot that is good
+    // for display but not necessarily safe to feed back into the solver.
+    // Rebuild if the reusable mesh state is incomplete or inconsistent.
+    if (!documentMeshLooksReusable(doc)) {
+        updateStatus(tr("Regenerating mesh before analysis..."));
+        onCreateMesh();
+        if (!documentMeshLooksReusable(doc)) {
+            updateStatus(tr("Analysis aborted: mesh regeneration failed."));
+            return;
+        }
+    }
+
     DrawingWidget *dw = currentDrawing();
 
     // Auto-save .fem file (keeps file on disk in sync)
@@ -1298,6 +1508,7 @@ void MainWindow::onAnalyze()
 
     m_overlayRenderer = new ResultsOverlayRenderer();
     m_overlayRenderer->setDocument(m_overlayDoc);
+    m_savedDensityType = (int)normalizeDensityType(m_overlayDoc, m_savedDensityType);
     m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
     m_overlayRenderer->setShowContours(m_savedOverlayContours);
     m_overlayRenderer->setShowLegend(m_savedOverlayLegend);
@@ -1309,6 +1520,9 @@ void MainWindow::onAnalyze()
 
     if (dw) {
         dw->setResultsOverlay(m_overlayRenderer);
+        if (auto *sub = qobject_cast<QMdiSubWindow *>(dw->parentWidget()))
+            mdiArea->setActiveSubWindow(sub);
+        dw->setFocus();
 
         // Apply manual color scale if set
         if (m_scaleAutoCheck && !m_scaleAutoCheck->isChecked()) {
@@ -1319,11 +1533,7 @@ void MainWindow::onAnalyze()
 
     // Enable overlay toggle actions
     m_densityMenu->setEnabled(true);
-    for (QAction *a : m_densityGroup->actions()) {
-        a->blockSignals(true);
-        a->setChecked(a->data().toInt() == m_savedDensityType);
-        a->blockSignals(false);
-    }
+    syncDensityMenuSelection(m_densityGroup, m_overlayDoc, m_savedDensityType);
     actOverlayContours->blockSignals(true);
     actOverlayContours->setEnabled(true);
     actOverlayContours->setChecked(m_savedOverlayContours);
@@ -1447,6 +1657,7 @@ void MainWindow::loadResultsOverlay(DrawingWidget *dw)
 
     m_overlayRenderer = new ResultsOverlayRenderer();
     m_overlayRenderer->setDocument(m_overlayDoc);
+    m_savedDensityType = (int)normalizeDensityType(m_overlayDoc, m_savedDensityType);
     m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
     m_overlayRenderer->setShowContours(m_savedOverlayContours);
     m_overlayRenderer->setShowLegend(m_savedOverlayLegend);
@@ -1458,15 +1669,14 @@ void MainWindow::loadResultsOverlay(DrawingWidget *dw)
         m_overlayRenderer->setAAQuality(static_cast<AAQuality>(checkedAA->data().toInt()));
 
     dw->setResultsOverlay(m_overlayRenderer);
+    if (auto *sub = qobject_cast<QMdiSubWindow *>(dw->parentWidget()))
+        mdiArea->setActiveSubWindow(sub);
+    dw->setFocus();
 
     // Enable toggle actions and restore saved states (block signals to avoid
     // re-triggering slots while we set the checked states)
     m_densityMenu->setEnabled(true);
-    for (QAction *a : m_densityGroup->actions()) {
-        a->blockSignals(true);
-        a->setChecked(a->data().toInt() == m_savedDensityType);
-        a->blockSignals(false);
-    }
+    syncDensityMenuSelection(m_densityGroup, m_overlayDoc, m_savedDensityType);
 
     actOverlayContours->blockSignals(true);
     actOverlayContours->setEnabled(true);
@@ -1499,10 +1709,13 @@ void MainWindow::loadResultsOverlay(DrawingWidget *dw)
 void MainWindow::onDensityTypeChanged(QAction *action)
 {
     int type = action->data().toInt();
+    if (!densityTypeSupported(m_overlayDoc, static_cast<DensityType>(type)))
+        return;
     m_savedDensityType = type;
-    QSettings().setValue("view/densityType", type);
+    syncDensityMenuSelection(m_densityGroup, m_overlayDoc, m_savedDensityType);
+    QSettings().setValue("view/densityType", m_savedDensityType);
     if (!m_overlayRenderer) return;
-    m_overlayRenderer->setShowDensity(static_cast<DensityType>(type));
+    m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
     updateScaleSpinboxes();
     DrawingWidget *dw = currentDrawing();
     if (dw) dw->refreshDisplay();
@@ -1543,14 +1756,14 @@ void MainWindow::updateScaleSpinboxes()
     if (!m_overlayRenderer || !m_overlayDoc) return;
 
     // Get current data bounds for the active density type
-    double lo = 0.0, hi = 1.0;
-    DensityType dt = static_cast<DensityType>(m_savedDensityType);
-    if (dt == DensityType::IronLoss) {
-        lo = m_overlayDoc->ironLoss_Low;
-        hi = m_overlayDoc->ironLoss_High;
-    } else {
-        lo = m_overlayDoc->B_Low;
-        hi = m_overlayDoc->B_High;
+    double lo = 0.0;
+    double hi = 1.0;
+    if (static_cast<DensityType>(m_savedDensityType) != DensityType::None) {
+        auto bounds = m_overlayRenderer->computePercentileBounds(1.0);
+        lo = bounds.first;
+        hi = bounds.second;
+        if (std::fabs(hi - lo) < 1e-30)
+            hi = lo + 1.0;
     }
 
     m_scaleMinSpin->blockSignals(true);
@@ -1578,7 +1791,8 @@ void MainWindow::onClearOverlay()
 
     // Disable overlay-related UI
     actClearOverlay->setEnabled(false);
-    m_densityMenu->setEnabled(false);
+    m_densityMenu->setEnabled(true);
+    syncDensityMenuSelection(m_densityGroup, nullptr, m_savedDensityType);
     actOverlayContours->setEnabled(false);
     actOverlayMesh->setEnabled(false);
     actOverlayLegend->setEnabled(false);
@@ -1830,6 +2044,7 @@ void MainWindow::onMotionFinished(bool success, const QString &csvPath, const QS
             QSettings().setValue("view/densityType", m_savedDensityType);
         }
 
+        m_savedDensityType = (int)normalizeDensityType(m_overlayDoc, m_savedDensityType);
         m_overlayRenderer->setShowDensity(static_cast<DensityType>(m_savedDensityType));
         m_overlayRenderer->setShowContours(m_savedOverlayContours);
         m_overlayRenderer->setShowLegend(m_savedOverlayLegend);
@@ -1840,14 +2055,13 @@ void MainWindow::onMotionFinished(bool success, const QString &csvPath, const QS
             m_overlayRenderer->setAAQuality(static_cast<AAQuality>(checkedAA->data().toInt()));
 
         dw->setResultsOverlay(m_overlayRenderer);
+        if (auto *sub = qobject_cast<QMdiSubWindow *>(dw->parentWidget()))
+            mdiArea->setActiveSubWindow(sub);
+        dw->setFocus();
 
         // Enable overlay UI controls
         m_densityMenu->setEnabled(true);
-        for (QAction *a : m_densityGroup->actions()) {
-            a->blockSignals(true);
-            a->setChecked(a->data().toInt() == m_savedDensityType);
-            a->blockSignals(false);
-        }
+        syncDensityMenuSelection(m_densityGroup, m_overlayDoc, m_savedDensityType);
         actOverlayContours->setEnabled(true);
         actOverlayContours->setChecked(m_savedOverlayContours);
         actOverlayMesh->setEnabled(true);

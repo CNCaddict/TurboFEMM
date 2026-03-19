@@ -33,7 +33,9 @@ struct MetalBackendImpl
 
     // Compute pipeline states for each kernel
     id<MTLComputePipelineState> pso_spmv;
+    id<MTLComputePipelineState> pso_spmv_dot_partial;
     id<MTLComputePipelineState> pso_jacobi;
+    id<MTLComputePipelineState> pso_jacobi_dot_partial;
     id<MTLComputePipelineState> pso_axpy;
     id<MTLComputePipelineState> pso_scal;
     id<MTLComputePipelineState> pso_copy;
@@ -41,7 +43,7 @@ struct MetalBackendImpl
     id<MTLComputePipelineState> pso_dot_partial;
     id<MTLComputePipelineState> pso_dot_finalize;
 
-    // Matrix buffers (CSR upper triangle) — float32 on GPU
+    // Matrix buffers (full CSR off-diagonal + separate diagonal) — float32 on GPU
     id<MTLBuffer> buf_diag;
     id<MTLBuffer> buf_row_ptr;
     id<MTLBuffer> buf_col_idx;
@@ -175,7 +177,9 @@ struct MetalBackendImpl
     bool initPipelines()
     {
         pso_spmv         = makePSO("spmv_symmetric");
+        pso_spmv_dot_partial = makePSO("spmv_dot_partial");
         pso_jacobi       = makePSO("jacobi_precond");
+        pso_jacobi_dot_partial = makePSO("jacobi_precond_dot_partial");
         pso_axpy         = makePSO("axpy_kernel");
         pso_scal         = makePSO("scal_kernel");
         pso_copy         = makePSO("copy_kernel");
@@ -183,7 +187,8 @@ struct MetalBackendImpl
         pso_dot_partial  = makePSO("dot_partial");
         pso_dot_finalize = makePSO("dot_finalize");
 
-        return (pso_spmv && pso_jacobi && pso_axpy && pso_scal &&
+        return (pso_spmv && pso_spmv_dot_partial &&
+                pso_jacobi && pso_jacobi_dot_partial && pso_axpy && pso_scal &&
                 pso_copy && pso_zero && pso_dot_partial && pso_dot_finalize);
     }
 
@@ -311,7 +316,6 @@ void MetalBackend::uploadMatrixReal(int n, int nnz,
     if (!impl) return;
 
     impl->n = n;
-    impl->nnz = nnz;
     impl->threadgroup_size = 256;
     impl->num_threadgroups = (n + 255) / 256;
 
@@ -320,14 +324,46 @@ void MetalBackend::uploadMatrixReal(int n, int nnz,
     convertDoubleToFloat(diag, fdiag.data(), n);
     impl->buf_diag = impl->makeBuffer(fdiag.data(), n * sizeof(float));
 
-    // row_ptr and col_idx are int — no conversion needed
-    impl->buf_row_ptr = impl->makeBuffer(row_ptr, (n+1) * sizeof(int));
-    impl->buf_col_idx = impl->makeBuffer(col_idx, nnz * sizeof(int));
+    // Expand the solver's symmetric upper-triangular CSR into full CSR so
+    // the SpMV kernel can compute one output row per thread with no atomics.
+    std::vector<int> rowCounts(n, 0);
+    for (int row = 0; row < n; row++) {
+        for (int j = row_ptr[row]; j < row_ptr[row + 1]; j++) {
+            int col = col_idx[j];
+            rowCounts[row]++;
+            rowCounts[col]++;
+        }
+    }
 
-    // Convert double values to float for GPU (SIMD-accelerated)
-    std::vector<float> fvalues(nnz);
-    convertDoubleToFloat(values, fvalues.data(), nnz);
-    impl->buf_values = impl->makeBuffer(fvalues.data(), nnz * sizeof(float));
+    std::vector<int> fullRowPtr(n + 1, 0);
+    for (int i = 0; i < n; i++)
+        fullRowPtr[i + 1] = fullRowPtr[i] + rowCounts[i];
+
+    int fullNnz = fullRowPtr[n];
+    impl->nnz = fullNnz;
+
+    std::vector<int> fullColIdx(fullNnz);
+    std::vector<float> fullValues(fullNnz);
+    std::vector<int> writePos = fullRowPtr;
+
+    for (int row = 0; row < n; row++) {
+        for (int j = row_ptr[row]; j < row_ptr[row + 1]; j++) {
+            int col = col_idx[j];
+            float val = (float)values[j];
+
+            int pRow = writePos[row]++;
+            fullColIdx[pRow] = col;
+            fullValues[pRow] = val;
+
+            int pCol = writePos[col]++;
+            fullColIdx[pCol] = row;
+            fullValues[pCol] = val;
+        }
+    }
+
+    impl->buf_row_ptr = impl->makeBuffer(fullRowPtr.data(), (n + 1) * sizeof(int));
+    impl->buf_col_idx = impl->makeBuffer(fullColIdx.data(), fullNnz * sizeof(int));
+    impl->buf_values = impl->makeBuffer(fullValues.data(), fullNnz * sizeof(float));
 
     // Allocate dot product scratch buffers (float32)
     impl->buf_partial_sums = impl->makeBuffer(impl->num_threadgroups * sizeof(float));
@@ -384,20 +420,6 @@ void MetalBackend::spmv(const double* X, double* Y)
     int n = impl->n;
     id<MTLCommandBuffer> cmd = impl->getCmd();
 
-    // First zero Y
-    {
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:impl->pso_zero];
-        [enc setBuffer:bufY offset:0 atIndex:0];
-        [enc setBytes:&n length:sizeof(int) atIndex:1];
-        int tg = 256;
-        int groups = (n + tg - 1) / tg;
-        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
-           threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [enc endEncoding];
-    }
-
-    // Then SpMV
     {
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
         [enc setComputePipelineState:impl->pso_spmv];
@@ -447,6 +469,95 @@ void MetalBackend::precondJacobi(const double* X, double* Y)
     if (!impl->batchMode) {
         impl->commitAndWait(cmd);
     }
+}
+
+double MetalBackend::spmvDot(const double* X, double* Y)
+{
+    if (!impl) return 0.0;
+
+    id<MTLBuffer> bufX = impl->resolveBuffer(X);
+    id<MTLBuffer> bufY = impl->resolveBuffer(Y);
+    if (!bufX || !bufY) return 0.0;
+
+    int n = impl->n;
+    int ng = impl->num_threadgroups;
+    id<MTLCommandBuffer> cmd = impl->getCmd();
+
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl->pso_spmv_dot_partial];
+        [enc setBuffer:impl->buf_diag         offset:0 atIndex:0];
+        [enc setBuffer:impl->buf_row_ptr      offset:0 atIndex:1];
+        [enc setBuffer:impl->buf_col_idx      offset:0 atIndex:2];
+        [enc setBuffer:impl->buf_values       offset:0 atIndex:3];
+        [enc setBuffer:bufX                   offset:0 atIndex:4];
+        [enc setBuffer:bufY                   offset:0 atIndex:5];
+        [enc setBuffer:impl->buf_partial_sums offset:0 atIndex:6];
+        [enc setBytes:&n length:sizeof(int) atIndex:7];
+        int tg = 256;
+        int groups = (n + tg - 1) / tg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [enc endEncoding];
+    }
+
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl->pso_dot_finalize];
+        [enc setBuffer:impl->buf_partial_sums offset:0 atIndex:0];
+        [enc setBuffer:impl->buf_dot_result   offset:0 atIndex:1];
+        [enc setBytes:&ng length:sizeof(int) atIndex:2];
+        int tg2 = 256;
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tg2, 1, 1)];
+        [enc endEncoding];
+    }
+
+    impl->commitAndWait(cmd);
+    return (double)((float*)[impl->buf_dot_result contents])[0];
+}
+
+double MetalBackend::precondJacobiDot(const double* X, double* Y)
+{
+    if (!impl) return 0.0;
+
+    id<MTLBuffer> bufX = impl->resolveBuffer(X);
+    id<MTLBuffer> bufY = impl->resolveBuffer(Y);
+    if (!bufX || !bufY) return 0.0;
+
+    int n = impl->n;
+    int ng = impl->num_threadgroups;
+    id<MTLCommandBuffer> cmd = impl->getCmd();
+
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl->pso_jacobi_dot_partial];
+        [enc setBuffer:impl->buf_diag         offset:0 atIndex:0];
+        [enc setBuffer:bufX                   offset:0 atIndex:1];
+        [enc setBuffer:bufY                   offset:0 atIndex:2];
+        [enc setBuffer:impl->buf_partial_sums offset:0 atIndex:3];
+        [enc setBytes:&n length:sizeof(int) atIndex:4];
+        int tg = 256;
+        int groups = (n + tg - 1) / tg;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [enc endEncoding];
+    }
+
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl->pso_dot_finalize];
+        [enc setBuffer:impl->buf_partial_sums offset:0 atIndex:0];
+        [enc setBuffer:impl->buf_dot_result   offset:0 atIndex:1];
+        [enc setBytes:&ng length:sizeof(int) atIndex:2];
+        int tg2 = 256;
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(tg2, 1, 1)];
+        [enc endEncoding];
+    }
+
+    impl->commitAndWait(cmd);
+    return (double)((float*)[impl->buf_dot_result contents])[0];
 }
 
 double MetalBackend::dot(const double* X, const double* Y)

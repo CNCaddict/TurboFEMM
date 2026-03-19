@@ -159,6 +159,50 @@ struct FMeshElement {
 };
 
 // ---------------------------------------------------------------
+// Sliding band for motion sweep optimisation
+// ---------------------------------------------------------------
+// Forward-declare MeshEdge (defined in meshgen.h) — we only store
+// vectors of them, so a forward declaration suffices.
+struct MeshEdge;
+
+struct SlidingBand {
+    bool active = false;
+    bool isRotation = true;
+    double cx = 0.0, cy = 0.0;         // rotation center (model units)
+    double innerRadius = 0.0;           // inner interface circle
+    double outerRadius = 0.0;           // outer interface circle
+    bool rotorIsInside = true;          // true=inner rotor, false=outer rotor
+    int airBlockLabel = 0;              // 1-based block label index for air region
+    int numInterfaceNodes = 0;          // N nodes per circle
+    int movingGroup = 0;                // which group number is the rotor
+
+    // For linear motion
+    double linePos0 = 0.0, linePos1 = 0.0; // band boundary positions along motion-normal axis
+    double lineDirX = 0.0, lineDirY = 0.0; // motion direction (unit vector)
+
+    // Node classification (indices into doc->meshNodes)
+    std::vector<int> rotorNodeIndices;       // nodes inside inner circle
+    std::vector<int> innerCircleNodeIndices;  // N nodes on inner interface (sorted by angle)
+    std::vector<int> outerCircleNodeIndices;  // N nodes on outer interface (sorted by angle)
+
+    // Base angles (radians) for interface nodes
+    std::vector<double> innerBaseAngles;
+    std::vector<double> outerBaseAngles;
+
+    // Element classification
+    std::vector<int> rotorElementIndices;
+    std::vector<int> statorElementIndices;
+    int bandElementStart = 0;   // start index in doc->meshElements
+    int bandElementCount = 0;   // number of band elements
+
+    // Fixed edges (rotor + stator) — don't change across steps
+    // Band edges are regenerated each step by remeshBand().
+    std::vector<MeshEdge> fixedEdges;
+
+    double cumulativeAngle = 0.0;  // total rotation applied (degrees)
+};
+
+// ---------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------
 

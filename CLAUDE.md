@@ -14,6 +14,8 @@ Every time code is pushed to GitHub:
 
 ## Testing Requirements
 - **Run unit tests after every code change:** `cd build && make -j8 femm-tests && ./tests/femm-tests`
+- **When changing any GUI/runtime code, also rebuild the actual app bundle:** `cd build && make -j8 femm-gui`
+- **Do not assume `femm-tests` rebuilds the app the user is launching.** If the user is testing in the GUI, verify `/build/gui/femm-gui.app` was rebuilt.
 - **All 89+ tests must pass** before considering any change complete (1 known edge-case failure in `adaptiveSolveFailureRecovery` is acceptable)
 - **Add new tests** when implementing new features or fixing bugs — cover the new behavior
 - **Update existing tests** if behavior intentionally changes — don't just delete failing tests
@@ -28,6 +30,7 @@ Every time code is pushed to GitHub:
 ```bash
 cd build
 make -j8              # Build GUI app
+make -j8 femm-gui     # Rebuild the actual app bundle the user launches
 make -j8 femm-tests   # Build tests
 ./tests/femm-tests    # Run tests
 make -j8 femm-bench   # Build benchmarks

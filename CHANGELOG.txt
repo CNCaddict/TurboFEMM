@@ -1,6 +1,77 @@
 TurboFEMM Changelog
 ===================
 
+Version 4.3.2 (2026-03-19)
+---------------------------
+
+NEW FEATURES:
+  - Sliding band mesh optimization for motion sweeps: meshes once, then
+    only re-triangulates a thin airgap strip each step. Automatic airgap
+    detection for inner and outer rotor motors. Dashed cyan interface
+    circles shown in mesh view.
+  - Az-based eddy current loss model for solid low-mu conductors (magnets)
+    with per-block mean subtraction to cancel gauge/motion artifacts
+  - Rotor-frame solid loss computation: rotates sampled B into the local
+    co-rotating radial/tangential frame before dB/dt calculation, removing
+    spurious losses from the main synchronous PM field
+  - Label-aware B-history lookup for iron loss: each snapshot now stores
+    block label indices for more accurate material-region matching
+  - Rotor-frame backiron probe values exportable in motion CSV for
+    debugging local field continuity
+
+IMPROVEMENTS:
+  - Density Plot menu: mutually-exclusive radio selection, hide/disable
+    unsupported entries (|J| removed, |Re(B)|/|Im(B)| hidden for DC,
+    Iron Loss disabled when no loss data)
+  - Retina/device-pixel resolution rendering for offscreen PNG/GIF capture
+  - Iron loss heatmaps now use smoothed nodal shading instead of hard
+    per-triangle boundaries
+  - |H| density overlay rendering fixed (was showing zero everywhere)
+  - Mesh reusability validation before Analyze to prevent crashes from
+    stale motion sweep state
+
+BUG FIXES:
+  - Fixed Analyze-after-motion crashes caused by reusing invalid in-memory
+    mesh state
+  - Fixed motion GIF/PNG capture inheriting the live GUI density selection
+    and producing blank/non-field frames
+  - Fixed duplicate iron-loss stills being written into motion PNG output
+  - Fixed offscreen GIF quantization artifacts by using per-frame local
+    palettes instead of one coarse global palette
+  - Removed stale sliding-band controls/guide artifacts from the normal
+    GUI workflow while the feature remains disabled in the Problem dialog
+  - Fixed slidingBandManualRadiiPreserved test to use auto-detected radii
+    after sliding band metadata was removed from .fem file saves
+
+Version 4.3.1 (2026-03-17)
+---------------------------
+
+IMPROVEMENTS:
+  - Motion PNG/GIF capture now always renders `|B|` with a fixed capture
+    scale, so animations stay visually consistent across sweep steps
+  - PNG/GIF export now renders at Retina/device-pixel resolution for
+    smoother anti-aliased captures
+  - Iron loss heatmaps now use smoothed nodal shading instead of hard
+    per-triangle boundaries
+  - Added optional "accurate solid rotor losses" mode for motion sweeps
+  - Motion CSV can now include signed rotor-frame backiron probe values
+    for debugging local field continuity
+
+BUG FIXES:
+  - Fixed motion GIF/PNG capture inheriting the live GUI density selection
+    and producing blank/non-field frames
+  - Fixed duplicate iron-loss stills being written into motion PNG output
+  - Fixed Analyze-after-motion crashes caused by reusing invalid in-memory
+    mesh state
+  - Fixed several Density Plot menu issues: mutually-exclusive selection,
+    broken `|H|` rendering, and misleading/unsupported entries
+  - Fixed motion capture/export rendering to include the full geometry
+    consistently
+  - Fixed offscreen GIF quantization artifacts by using per-frame local
+    palettes instead of one coarse global palette
+  - Removed stale sliding-band controls/guide artifacts from the normal GUI
+    workflow while the feature remains disabled
+
 Version 4.3.0 (2026-03-13)
 ---------------------------
 
@@ -16,6 +87,10 @@ NEW FEATURES:
   - H-adaptive mesh refinement (ZZ error estimator, two-phase refine/coarsen)
   - Metal GPU-accelerated PCG solver backend (macOS)
   - In-process solver (no disk I/O for intermediate results)
+  - Sliding band mesh optimization for motion sweeps: meshes once, then
+    only re-triangulates a thin airgap strip each step (no Triangle calls
+    after step 0). Automatic airgap detection for inner and outer rotor
+    motors. Dashed cyan interface circles shown in mesh view.
   - Comprehensive UI tooltips on all dialog parameters
 
 IMPROVEMENTS:

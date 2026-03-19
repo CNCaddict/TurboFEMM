@@ -8,6 +8,7 @@
 #include <QTemporaryFile>
 #include <QFile>
 #include <cmath>
+#include <array>
 
 static const QString solenoidPath = QString(TEST_DATA_DIR) + "/solenoid.fem";
 
@@ -228,15 +229,33 @@ void TestDocument::lrkRoundTripFileDiff()
     QVERIFY(origFile.open(QIODevice::ReadOnly | QIODevice::Text));
     QVERIFY(savedFile.open(QIODevice::ReadOnly | QIODevice::Text));
 
+    auto isIgnoredDiff = [](const QString &line) {
+        return line.startsWith("[SlidingBandInnerRadius]", Qt::CaseInsensitive) ||
+               line.startsWith("[SlidingBandOuterRadius]", Qt::CaseInsensitive);
+    };
+
     QTextStream origIn(&origFile);
     QTextStream savedIn(&savedFile);
+    QStringList origLines;
+    QStringList savedLines;
+    while (!origIn.atEnd()) {
+        QString line = origIn.readLine();
+        if (!isIgnoredDiff(line))
+            origLines.push_back(line);
+    }
+    while (!savedIn.atEnd()) {
+        QString line = savedIn.readLine();
+        if (!isIgnoredDiff(line))
+            savedLines.push_back(line);
+    }
 
     int lineNum = 0;
     int diffCount = 0;
-    while (!origIn.atEnd() && !savedIn.atEnd()) {
+    int compareCount = std::min(origLines.size(), savedLines.size());
+    for (int i = 0; i < compareCount; i++) {
         lineNum++;
-        QString origLine = origIn.readLine();
-        QString savedLine = savedIn.readLine();
+        const QString &origLine = origLines[i];
+        const QString &savedLine = savedLines[i];
         if (origLine != savedLine) {
             diffCount++;
             if (diffCount <= 30) {
@@ -246,17 +265,14 @@ void TestDocument::lrkRoundTripFileDiff()
             }
         }
     }
-    // Check for extra lines
-    while (!origIn.atEnd()) {
+    for (int i = compareCount; i < origLines.size(); i++) {
         lineNum++;
-        origIn.readLine();
         diffCount++;
         if (diffCount <= 30)
             qWarning("LINE %d: ORIG has extra line", lineNum);
     }
-    while (!savedIn.atEnd()) {
+    for (int i = compareCount; i < savedLines.size(); i++) {
         lineNum++;
-        savedIn.readLine();
         diffCount++;
         if (diffCount <= 30)
             qWarning("LINE %d: SAVED has extra line", lineNum);
@@ -752,7 +768,7 @@ void TestDocument::rotorLossInverseTransform()
     rdoc.elements[0].B1 = CmplxF(0.5, 0); rdoc.elements[0].B2 = CmplxF(0.3, 0);
 
     // Build BSnapshots: rotor element was at a rotated position at each step.
-    // Rotation: 10° per step, center (0,0), 2 total steps (steps 0,1,2).
+    // Rotation: 10° per step, center (0,0), 3 total steps (steps 0,1,2).
     // At step s, element was at angle = -(2-s)*10° from final position (10,0).
     //   Step 0: rotated -20° → centroid at (10*cos(-20°), 10*sin(-20°))
     //   Step 1: rotated -10° → centroid at (10*cos(-10°), 10*sin(-10°))
@@ -787,14 +803,15 @@ void TestDocument::rotorLossInverseTransform()
     bHistory[2].add(10.0f, 0.0f, 1.0f, 0.5f);    // rotor |B| ≈ 1.118
     bHistory[2].add(10.0f, 0.01f, 0.12f, 0.06f); // stator nearby |B| ≈ 0.134
 
-    // Motion params: rotation, 10° per step, 2 total steps, group 1
+    // Motion params: rotation, 10° per step, 3 total steps (steps 0,1,2), group 1.
+    // In real usage, totalSteps == bHistory.size() (one snapshot per step).
     MotionParams motion;
     motion.movingGroup = 1;
     motion.isRotation = true;
     motion.cx = 0.0;
     motion.cy = 0.0;
     motion.anglePerStep = 10.0;
-    motion.totalSteps = 2;
+    motion.totalSteps = 3;
 
     IronLossResult result = computeIronLosses(bHistory, &rdoc, 60.0, 0.050, motion);
 
@@ -827,6 +844,71 @@ void TestDocument::rotorLossInverseTransform()
     // Step 2 B at (10,0) = sqrt(1.0² + 0.5²) = 1.118
     // So Bpeak without motion ≈ 1.118 (much less than 1.844 with motion)
     QVERIFY(resultNoMotion.elementLosses[0].Bpeak < result.elementLosses[0].Bpeak);
+}
+
+void TestDocument::rotorLossLabelAwareLookup()
+{
+    // Historical lookup should prefer samples from the same block label,
+    // even if a different material's centroid is slightly closer.
+    ResultsDocument rdoc;
+    rdoc.problemType = 0;
+    rdoc.lengthUnits = 1;
+    rdoc.lengthConv = 0.001;
+    rdoc.frequency = 0.0;
+    rdoc.depth = 0.050;
+
+    SolnMaterial mat;
+    mat.blockName = "Test Steel";
+    mat.Kh = 210.375;
+    mat.Kc = 0.370566;
+    mat.Ke = 7.65;
+    mat.alpha_loss = 2.0;
+    mat.density = 7650.0;
+    rdoc.materials.push_back(mat);
+
+    SolnLabel rotorLbl;
+    rotorLbl.blockType = 0;
+    rotorLbl.calculateLosses = true;
+    rdoc.labels.push_back(rotorLbl);
+
+    SolnLabel otherLbl;
+    otherLbl.blockType = 0;
+    otherLbl.calculateLosses = true;
+    rdoc.labels.push_back(otherLbl);
+
+    rdoc.nodes.resize(3);
+    rdoc.nodes[0] = {0.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[1] = {20.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[2] = {10.0, 10.0, CmplxF(0, 0), 0.0};
+
+    rdoc.elements.resize(1);
+    rdoc.elements[0].p[0] = 0;
+    rdoc.elements[0].p[1] = 1;
+    rdoc.elements[0].p[2] = 2;
+    rdoc.elements[0].lbl = 0;
+    rdoc.elements[0].blk = 0;
+    rdoc.elements[0].cx = 10.0;
+    rdoc.elements[0].cy = 10.0 / 3.0;
+    rdoc.elements[0].B1 = CmplxF(0.2, 0);
+    rdoc.elements[0].B2 = CmplxF(0.1, 0);
+
+    std::vector<BSnapshot> bHistory(3);
+    bHistory[0].add(10.25f, 10.0f/3.0f, 0.9f, 0.1f, 0.0f, 0);
+    bHistory[0].add(10.02f, 10.0f/3.0f, 0.05f, 0.02f, 0.0f, 1);
+    bHistory[1].add(10.25f, 10.0f/3.0f, 1.6f, 0.3f, 0.0f, 0);
+    bHistory[1].add(10.02f, 10.0f/3.0f, 0.04f, 0.03f, 0.0f, 1);
+    bHistory[2].add(10.25f, 10.0f/3.0f, 1.1f, 0.2f, 0.0f, 0);
+    bHistory[2].add(10.02f, 10.0f/3.0f, 0.03f, 0.01f, 0.0f, 1);
+
+    IronLossResult result = computeIronLosses(bHistory, &rdoc, 60.0, 0.050);
+
+    QVERIFY(result.valid);
+    QCOMPARE((int)result.elementLosses.size(), 1);
+
+    double expectedBpk = std::sqrt(1.6 * 1.6 + 0.3 * 0.3);
+    QVERIFY2(std::fabs(result.elementLosses[0].Bpeak - expectedBpk) < 0.02,
+             qPrintable(QString("Expected label-aware Bpk %1, got %2")
+                 .arg(expectedBpk).arg(result.elementLosses[0].Bpeak)));
 }
 
 void TestDocument::conductiveEddyLossAutoCompute()
@@ -928,13 +1010,460 @@ void TestDocument::conductiveEddyLossAutoCompute()
              "Solid conductor with Az=0 in all snapshots should have zero eddy loss");
 }
 
+void TestDocument::ferromagneticSolidAutoThicknessLoss()
+{
+    // Solid ferromagnetic conductors should use the dB/dt slab model with
+    // an auto-estimated characteristic thickness d = 2A/P, not the Az path.
+    ResultsDocument rdoc;
+    rdoc.problemType = 0;
+    rdoc.lengthUnits = 1;   // mm
+    rdoc.lengthConv = 0.001;
+    rdoc.frequency = 0.0;
+    rdoc.depth = 0.050;
+
+    SolnMaterial mat;
+    mat.blockName = "1018 Steel";
+    mat.mu_x = 529.0;
+    mat.mu_y = 529.0;
+    mat.Cduct = 5.8;   // MS/m
+    mat.Lam_d = 0.0;   // solid
+    mat.bhPoints = 13; // treat as ferromagnetic steel
+    mat.H_c = 0.0;
+    mat.density = 7850.0;
+    rdoc.materials.push_back(mat);
+
+    SolnLabel lbl;
+    lbl.blockType = 0;
+    lbl.calculateLosses = true;
+    rdoc.labels.push_back(lbl);
+
+    // Rectangle 20 mm x 10 mm, split into two triangles.
+    // Area = 200 mm², perimeter = 60 mm, so d = 2A/P = 6.666... mm.
+    rdoc.nodes.resize(4);
+    rdoc.nodes[0] = {0.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[1] = {20.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[2] = {20.0, 10.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[3] = {0.0, 10.0, CmplxF(0, 0), 0.0};
+
+    rdoc.elements.resize(2);
+    rdoc.elements[0].p[0] = 0;
+    rdoc.elements[0].p[1] = 1;
+    rdoc.elements[0].p[2] = 2;
+    rdoc.elements[0].lbl = 0;
+    rdoc.elements[0].blk = 0;
+    rdoc.elements[0].cx = 40.0 / 3.0;
+    rdoc.elements[0].cy = 10.0 / 3.0;
+    rdoc.elements[0].B1 = CmplxF(0.8, 0);
+    rdoc.elements[0].B2 = CmplxF(0.3, 0);
+
+    rdoc.elements[1].p[0] = 0;
+    rdoc.elements[1].p[1] = 2;
+    rdoc.elements[1].p[2] = 3;
+    rdoc.elements[1].lbl = 0;
+    rdoc.elements[1].blk = 0;
+    rdoc.elements[1].cx = 20.0 / 3.0;
+    rdoc.elements[1].cy = 20.0 / 3.0;
+    rdoc.elements[1].B1 = CmplxF(0.8, 0);
+    rdoc.elements[1].B2 = CmplxF(0.3, 0);
+
+    std::vector<BSnapshot> bHistory(3);
+    bHistory[0].add(40.0f/3.0f, 10.0f/3.0f, 0.2f, 0.1f);
+    bHistory[0].add(20.0f/3.0f, 20.0f/3.0f, 0.2f, 0.1f);
+    bHistory[1].add(40.0f/3.0f, 10.0f/3.0f, 0.5f, 0.2f);
+    bHistory[1].add(20.0f/3.0f, 20.0f/3.0f, 0.5f, 0.2f);
+    bHistory[2].add(40.0f/3.0f, 10.0f/3.0f, 0.8f, 0.3f);
+    bHistory[2].add(20.0f/3.0f, 20.0f/3.0f, 0.8f, 0.3f);
+
+    MotionParams motion;
+    motion.isRotation = true;
+    motion.anglePerStep = 2.0;
+    motion.totalSteps = 2;
+    motion.rpm = 1000.0;
+
+    IronLossResult result = computeIronLosses(bHistory, &rdoc, 100.0, 0.050, motion);
+
+    QVERIFY(result.valid);
+    QCOMPARE((int)result.elementLosses.size(), 2);
+
+    double dt = 2.0 / (6.0 * 1000.0);
+    double dBx01 = (0.5 - 0.2) / dt, dBy01 = (0.2 - 0.1) / dt;
+    double dBx12 = (0.8 - 0.5) / dt, dBy12 = (0.3 - 0.2) / dt;
+    double dbdt2_01 = dBx01 * dBx01 + dBy01 * dBy01;
+    double dbdt2_12 = dBx12 * dBx12 + dBy12 * dBy12;
+    double meanDbdt2 = 0.5 * (dbdt2_01 + dbdt2_12);
+
+    double sigma_SI = 5.8e6;
+    double d_m = 2.0 * (200.0e-6) / 0.060; // 2A/P = 6.666... mm
+    double expectedLoss_Wm3 = sigma_SI * d_m * d_m * meanDbdt2 / 12.0;
+    double expectedLoss_Wkg = expectedLoss_Wm3 / 7850.0;
+
+    for (int i = 0; i < 2; i++) {
+        QVERIFY2(result.elementLosses[i].loss_Wkg > 0.0,
+                 "Ferromagnetic solid should have non-zero dB/dt eddy loss");
+        double relErr = std::fabs(result.elementLosses[i].loss_Wkg - expectedLoss_Wkg)
+                        / expectedLoss_Wkg;
+        QVERIFY2(relErr < 0.01,
+                 qPrintable(QString("Auto-thickness steel loss elem %1: expected %2 W/kg, got %3 W/kg (err=%4%)")
+                     .arg(i).arg(expectedLoss_Wkg).arg(result.elementLosses[i].loss_Wkg)
+                     .arg(relErr * 100.0)));
+    }
+}
+
+void TestDocument::rotorSynchronousFieldRemoved()
+{
+    ResultsDocument rdoc;
+    rdoc.problemType = 0;
+    rdoc.lengthUnits = 1;   // mm
+    rdoc.lengthConv = 0.001;
+    rdoc.depth = 0.050;
+
+    SolnMaterial mat;
+    mat.blockName = "Rotor Iron";
+    mat.mu_x = 529.0;
+    mat.mu_y = 529.0;
+    mat.Cduct = 5.8;
+    mat.Lam_d = 0.0;
+    mat.bhPoints = 13;
+    mat.density = 7850.0;
+    rdoc.materials.push_back(mat);
+
+    SolnLabel lbl;
+    lbl.blockType = 0;
+    lbl.calculateLosses = true;
+    lbl.inGroup = 2;
+    rdoc.labels.push_back(lbl);
+
+    rdoc.nodes.resize(3);
+    rdoc.nodes[0] = {8.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[1] = {12.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[2] = {10.0, 2.0, CmplxF(0, 0), 0.0};
+
+    rdoc.elements.resize(1);
+    rdoc.elements[0].p[0] = 0;
+    rdoc.elements[0].p[1] = 1;
+    rdoc.elements[0].p[2] = 2;
+    rdoc.elements[0].lbl = 0;
+    rdoc.elements[0].blk = 0;
+    rdoc.elements[0].cx = 10.0;
+    rdoc.elements[0].cy = 2.0 / 3.0;
+    rdoc.elements[0].B1 = CmplxF(1.0, 0);
+    rdoc.elements[0].B2 = CmplxF(0.0, 0);
+
+    std::vector<BSnapshot> bHistory(3);
+    const double pointAngle = std::atan2(rdoc.elements[0].cy, rdoc.elements[0].cx);
+    const double radius = std::hypot(rdoc.elements[0].cx, rdoc.elements[0].cy);
+    const double localBr = 1.0;
+    const double localBt = 0.25;
+    const double anglePerStep = 30.0;
+
+    for (int step = 0; step < (int)bHistory.size(); step++) {
+        int stepsBack = (int)bHistory.size() - 1 - step;
+        double historyAngle = pointAngle - stepsBack * anglePerStep * M_PI / 180.0;
+        double qx = radius * std::cos(historyAngle);
+        double qy = radius * std::sin(historyAngle);
+        double bx = localBr * std::cos(historyAngle) - localBt * std::sin(historyAngle);
+        double by = localBr * std::sin(historyAngle) + localBt * std::cos(historyAngle);
+        bHistory[step].add((float)qx, (float)qy, (float)bx, (float)by, 0.0f, 0);
+    }
+
+    MotionParams motion;
+    motion.movingGroup = 2;
+    motion.isRotation = true;
+    motion.cx = 0.0;
+    motion.cy = 0.0;
+    motion.anglePerStep = anglePerStep;
+    motion.totalSteps = 3;
+    motion.rpm = 3000.0;
+
+    IronLossResult result = computeIronLosses(bHistory, &rdoc, 100.0, 0.050, motion);
+
+    QVERIFY(result.valid);
+    QCOMPARE((int)result.elementLosses.size(), 1);
+    QVERIFY2(result.elementLosses[0].loss_Wkg < 1e-6,
+             qPrintable(QString("Expected rotor-synchronous field to be removed, got %1 W/kg")
+                 .arg(result.elementLosses[0].loss_Wkg)));
+}
+
+void TestDocument::rotorBackironAnnularProfileBias()
+{
+    // Annular solid rotor backiron should show higher loss on the inner
+    // (stator-facing) side when the boundary dB/dt history is stronger there,
+    // even if the centroid-sampled base history is uniform.
+    ResultsDocument rdoc;
+    rdoc.problemType = 0;
+    rdoc.lengthUnits = 1;   // mm
+    rdoc.lengthConv = 0.001;
+    rdoc.frequency = 0.0;
+    rdoc.depth = 0.050;
+
+    SolnMaterial mat;
+    mat.blockName = "Rotor Iron";
+    mat.mu_x = 529.0;
+    mat.mu_y = 529.0;
+    mat.Cduct = 5.8;
+    mat.Lam_d = 0.0;
+    mat.bhPoints = 13;
+    mat.density = 7850.0;
+    rdoc.materials.push_back(mat);
+
+    SolnLabel lbl;
+    lbl.blockType = 0;
+    lbl.calculateLosses = true;
+    lbl.inGroup = 2;
+    rdoc.labels.push_back(lbl);
+
+    const std::array<double, 3> radii = {10.0, 12.0, 14.0};
+    const std::array<double, 4> angles = {
+        0.0, 0.5 * M_PI, M_PI, 1.5 * M_PI
+    };
+
+    for (double r : radii) {
+        for (double a : angles) {
+            rdoc.nodes.push_back({r * std::cos(a), r * std::sin(a), CmplxF(0, 0), 0.0});
+        }
+    }
+    auto nodeIdx = [](int ring, int sec) { return ring * 4 + (sec % 4); };
+
+    auto addTri = [&](int n0, int n1, int n2) {
+        SolnElement elm;
+        elm.p[0] = n0; elm.p[1] = n1; elm.p[2] = n2;
+        elm.lbl = 0; elm.blk = 0;
+        elm.cx = (rdoc.nodes[n0].x + rdoc.nodes[n1].x + rdoc.nodes[n2].x) / 3.0;
+        elm.cy = (rdoc.nodes[n0].y + rdoc.nodes[n1].y + rdoc.nodes[n2].y) / 3.0;
+        elm.B1 = CmplxF(0.6, 0);
+        elm.B2 = CmplxF(0.2, 0);
+        rdoc.elements.push_back(elm);
+    };
+
+    for (int sec = 0; sec < 4; sec++) {
+        int sec1 = (sec + 1) % 4;
+        // Inner radial band 10-12 mm
+        addTri(nodeIdx(0, sec), nodeIdx(1, sec),  nodeIdx(1, sec1));
+        addTri(nodeIdx(0, sec), nodeIdx(1, sec1), nodeIdx(0, sec1));
+        // Outer radial band 12-14 mm
+        addTri(nodeIdx(1, sec), nodeIdx(2, sec),  nodeIdx(2, sec1));
+        addTri(nodeIdx(1, sec), nodeIdx(2, sec1), nodeIdx(1, sec1));
+    }
+
+    std::vector<BSnapshot> bHistory(3);
+
+    // Uniform centroid histories for all annulus elements.
+    const float bx0 = 0.4f, bx1 = 0.7f, bx2 = 1.0f;
+    for (const auto &elm : rdoc.elements) {
+        bHistory[0].add((float)elm.cx, (float)elm.cy, bx0, 0.1f, 0.0f, 0);
+        bHistory[1].add((float)elm.cx, (float)elm.cy, bx1, 0.1f, 0.0f, 0);
+        bHistory[2].add((float)elm.cx, (float)elm.cy, bx2, 0.1f, 0.0f, 0);
+    }
+
+    // Boundary samples by sector: stronger variation near the inner radius,
+    // weaker variation near the outer radius.
+    const std::array<double, 4> sampleAngles = {
+        0.25 * M_PI, 0.75 * M_PI, 1.25 * M_PI, 1.75 * M_PI
+    };
+    for (double a : sampleAngles) {
+        double ci = std::cos(a), si = std::sin(a);
+        double rInner = 10.8;
+        double rOuter = 13.2;
+        bHistory[0].add((float)(rInner * ci), (float)(rInner * si), 0.2f, 0.0f, 0.0f, 0);
+        bHistory[1].add((float)(rInner * ci), (float)(rInner * si), 0.8f, 0.0f, 0.0f, 0);
+        bHistory[2].add((float)(rInner * ci), (float)(rInner * si), 1.4f, 0.0f, 0.0f, 0);
+
+        bHistory[0].add((float)(rOuter * ci), (float)(rOuter * si), 0.2f, 0.0f, 0.0f, 0);
+        bHistory[1].add((float)(rOuter * ci), (float)(rOuter * si), 0.3f, 0.0f, 0.0f, 0);
+        bHistory[2].add((float)(rOuter * ci), (float)(rOuter * si), 0.4f, 0.0f, 0.0f, 0);
+    }
+
+    MotionParams motion;
+    motion.movingGroup = 2;
+    motion.isRotation = true;
+    motion.cx = 0.0;
+    motion.cy = 0.0;
+    motion.anglePerStep = 0.0;
+    motion.totalSteps = 3;
+    motion.rpm = 1000.0;
+
+    IronLossResult result = computeIronLosses(bHistory, &rdoc, 100.0, 0.050, motion);
+
+    QVERIFY(result.valid);
+    QCOMPARE((int)result.elementLosses.size(), (int)rdoc.elements.size());
+
+    double innerAvg = 0.0, outerAvg = 0.0;
+    int innerCount = 0, outerCount = 0;
+    for (int i = 0; i < (int)rdoc.elements.size(); i++) {
+        double r0 = std::sqrt(rdoc.nodes[rdoc.elements[i].p[0]].x * rdoc.nodes[rdoc.elements[i].p[0]].x +
+                              rdoc.nodes[rdoc.elements[i].p[0]].y * rdoc.nodes[rdoc.elements[i].p[0]].y);
+        double r1 = std::sqrt(rdoc.nodes[rdoc.elements[i].p[1]].x * rdoc.nodes[rdoc.elements[i].p[1]].x +
+                              rdoc.nodes[rdoc.elements[i].p[1]].y * rdoc.nodes[rdoc.elements[i].p[1]].y);
+        double r2 = std::sqrt(rdoc.nodes[rdoc.elements[i].p[2]].x * rdoc.nodes[rdoc.elements[i].p[2]].x +
+                              rdoc.nodes[rdoc.elements[i].p[2]].y * rdoc.nodes[rdoc.elements[i].p[2]].y);
+        double avgNodeRadius = (r0 + r1 + r2) / 3.0;
+        if (avgNodeRadius < 12.0) {
+            innerAvg += result.elementLosses[i].loss_Wkg;
+            innerCount++;
+        } else {
+            outerAvg += result.elementLosses[i].loss_Wkg;
+            outerCount++;
+        }
+    }
+    QVERIFY(innerCount > 0 && outerCount > 0);
+    innerAvg /= (double)innerCount;
+    outerAvg /= (double)outerCount;
+
+    QVERIFY2(innerAvg > outerAvg * 1.5,
+             qPrintable(QString("Expected inner backiron loss > outer loss, got inner=%1 outer=%2")
+                 .arg(innerAvg).arg(outerAvg)));
+}
+
+void TestDocument::accurateRotorBackironDiffusionMode()
+{
+    // The optional accurate solid-loss mode should produce a stronger
+    // stator-facing surface bias than the fast annular interpolation model.
+    ResultsDocument rdoc;
+    rdoc.problemType = 0;
+    rdoc.lengthUnits = 1;   // mm
+    rdoc.lengthConv = 0.001;
+    rdoc.frequency = 0.0;
+    rdoc.depth = 0.050;
+
+    SolnMaterial mat;
+    mat.blockName = "Rotor Iron";
+    mat.mu_x = 529.0;
+    mat.mu_y = 529.0;
+    mat.Cduct = 5.8;
+    mat.Lam_d = 0.0;
+    mat.bhPoints = 13;
+    mat.density = 7850.0;
+    rdoc.materials.push_back(mat);
+
+    SolnLabel lbl;
+    lbl.blockType = 0;
+    lbl.calculateLosses = true;
+    lbl.inGroup = 2;
+    rdoc.labels.push_back(lbl);
+
+    const std::array<double, 3> radii = {10.0, 12.0, 14.0};
+    const std::array<double, 4> angles = {
+        0.0, 0.5 * M_PI, M_PI, 1.5 * M_PI
+    };
+
+    for (double r : radii) {
+        for (double a : angles) {
+            rdoc.nodes.push_back({r * std::cos(a), r * std::sin(a), CmplxF(0, 0), 0.0});
+        }
+    }
+    auto nodeIdx = [](int ring, int sec) { return ring * 4 + (sec % 4); };
+    auto addTri = [&](int n0, int n1, int n2) {
+        SolnElement elm;
+        elm.p[0] = n0; elm.p[1] = n1; elm.p[2] = n2;
+        elm.lbl = 0; elm.blk = 0;
+        elm.cx = (rdoc.nodes[n0].x + rdoc.nodes[n1].x + rdoc.nodes[n2].x) / 3.0;
+        elm.cy = (rdoc.nodes[n0].y + rdoc.nodes[n1].y + rdoc.nodes[n2].y) / 3.0;
+        elm.B1 = CmplxF(0.6, 0);
+        elm.B2 = CmplxF(0.2, 0);
+        rdoc.elements.push_back(elm);
+    };
+
+    for (int sec = 0; sec < 4; sec++) {
+        int sec1 = (sec + 1) % 4;
+        addTri(nodeIdx(0, sec), nodeIdx(1, sec),  nodeIdx(1, sec1));
+        addTri(nodeIdx(0, sec), nodeIdx(1, sec1), nodeIdx(0, sec1));
+        addTri(nodeIdx(1, sec), nodeIdx(2, sec),  nodeIdx(2, sec1));
+        addTri(nodeIdx(1, sec), nodeIdx(2, sec1), nodeIdx(1, sec1));
+    }
+
+    std::vector<BSnapshot> bHistory(3);
+    for (const auto &elm : rdoc.elements) {
+        bHistory[0].add((float)elm.cx, (float)elm.cy, 0.4f, 0.1f, 0.0f, 0);
+        bHistory[1].add((float)elm.cx, (float)elm.cy, 0.7f, 0.1f, 0.0f, 0);
+        bHistory[2].add((float)elm.cx, (float)elm.cy, 1.0f, 0.1f, 0.0f, 0);
+    }
+
+    const std::array<double, 4> sampleAngles = {
+        0.25 * M_PI, 0.75 * M_PI, 1.25 * M_PI, 1.75 * M_PI
+    };
+    for (double a : sampleAngles) {
+        double ci = std::cos(a), si = std::sin(a);
+        double rInner = 10.8;
+        double rOuter = 13.2;
+        bHistory[0].add((float)(rInner * ci), (float)(rInner * si), 0.2f, 0.0f, 0.0f, 0);
+        bHistory[1].add((float)(rInner * ci), (float)(rInner * si), 0.9f, 0.0f, 0.0f, 0);
+        bHistory[2].add((float)(rInner * ci), (float)(rInner * si), 1.6f, 0.0f, 0.0f, 0);
+
+        bHistory[0].add((float)(rOuter * ci), (float)(rOuter * si), 0.2f, 0.0f, 0.0f, 0);
+        bHistory[1].add((float)(rOuter * ci), (float)(rOuter * si), 0.28f, 0.0f, 0.0f, 0);
+        bHistory[2].add((float)(rOuter * ci), (float)(rOuter * si), 0.36f, 0.0f, 0.0f, 0);
+    }
+
+    MotionParams motion;
+    motion.movingGroup = 2;
+    motion.isRotation = true;
+    motion.cx = 0.0;
+    motion.cy = 0.0;
+    motion.anglePerStep = 0.0;
+    motion.totalSteps = 3;
+    motion.rpm = 1000.0;
+
+    IronLossResult fastResult = computeIronLosses(bHistory, &rdoc, 100.0, 0.050, motion);
+
+    IronLossOptions accurateOptions;
+    accurateOptions.accurateSolidLosses = true;
+    accurateOptions.solidLossRadialCells = 16;
+    IronLossResult accurateResult = computeIronLosses(
+        bHistory, &rdoc, 100.0, 0.050, motion, accurateOptions);
+
+    QVERIFY(fastResult.valid);
+    QVERIFY(accurateResult.valid);
+    QCOMPARE((int)fastResult.elementLosses.size(), (int)rdoc.elements.size());
+    QCOMPARE((int)accurateResult.elementLosses.size(), (int)rdoc.elements.size());
+
+    auto radialAverages = [&](const IronLossResult &result) {
+        double innerAvg = 0.0, outerAvg = 0.0;
+        int innerCount = 0, outerCount = 0;
+        for (int i = 0; i < (int)rdoc.elements.size(); i++) {
+            double r0 = std::sqrt(rdoc.nodes[rdoc.elements[i].p[0]].x * rdoc.nodes[rdoc.elements[i].p[0]].x +
+                                  rdoc.nodes[rdoc.elements[i].p[0]].y * rdoc.nodes[rdoc.elements[i].p[0]].y);
+            double r1 = std::sqrt(rdoc.nodes[rdoc.elements[i].p[1]].x * rdoc.nodes[rdoc.elements[i].p[1]].x +
+                                  rdoc.nodes[rdoc.elements[i].p[1]].y * rdoc.nodes[rdoc.elements[i].p[1]].y);
+            double r2 = std::sqrt(rdoc.nodes[rdoc.elements[i].p[2]].x * rdoc.nodes[rdoc.elements[i].p[2]].x +
+                                  rdoc.nodes[rdoc.elements[i].p[2]].y * rdoc.nodes[rdoc.elements[i].p[2]].y);
+            double avgNodeRadius = (r0 + r1 + r2) / 3.0;
+            if (avgNodeRadius < 12.0) {
+                innerAvg += result.elementLosses[i].loss_Wkg;
+                innerCount++;
+            } else {
+                outerAvg += result.elementLosses[i].loss_Wkg;
+                outerCount++;
+            }
+        }
+        return std::pair<double, double>{
+            innerAvg / std::max(innerCount, 1),
+            outerAvg / std::max(outerCount, 1)
+        };
+    };
+
+    auto [fastInner, fastOuter] = radialAverages(fastResult);
+    auto [accurateInner, accurateOuter] = radialAverages(accurateResult);
+
+    QVERIFY(fastOuter > 0.0);
+    QVERIFY(accurateOuter > 0.0);
+    QVERIFY2((accurateInner / accurateOuter) > (fastInner / fastOuter) * 1.2,
+             qPrintable(QString("Expected accurate mode to strengthen the surface bias, fast=%1 accurate=%2")
+                 .arg(fastInner / fastOuter).arg(accurateInner / accurateOuter)));
+    QVERIFY2(accurateOuter < fastOuter,
+             qPrintable(QString("Expected accurate mode to cool the weak outer surface, fastOuter=%1 accurateOuter=%2")
+                 .arg(fastOuter).arg(accurateOuter)));
+    QVERIFY2(accurateInner > accurateOuter * 2.0,
+             qPrintable(QString("Expected accurate mode to favor the dominant inner surface, inner=%1 outer=%2")
+                 .arg(accurateInner).arg(accurateOuter)));
+}
+
 void TestDocument::azBasedSolidConductorLoss()
 {
     // Test Az-based eddy current loss for solid conductors (Lam_d = 0).
-    // P = sigma * <(dAz/dt)^2>  [W/m^3]
-    //
-    // This is exact for 2D: the spatial variation of Az across a conductor
-    // naturally limits the eddy current loops.  No slab dimension needed.
+    // The implementation removes the per-block mean dAz/dt before squaring,
+    // so isolated conductors don't pick up loss from a uniform/common-mode
+    // potential drift. Two equal-area elements with different local dAz/dt
+    // should therefore produce equal, finite losses.
 
     ResultsDocument rdoc;
     rdoc.problemType = 0;
@@ -959,34 +1488,47 @@ void TestDocument::azBasedSolidConductorLoss()
     lbl.calculateLosses = true;
     rdoc.labels.push_back(lbl);
 
-    // Single triangle with nodes that have varying Az values per step
-    rdoc.nodes.resize(3);
+    // Two equal-area triangles forming a square
+    rdoc.nodes.resize(4);
     rdoc.nodes[0] = {0.0, 0.0, CmplxF(0, 0), 0.0};
     rdoc.nodes[1] = {10.0, 0.0, CmplxF(0, 0), 0.0};
-    rdoc.nodes[2] = {5.0, 10.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[2] = {10.0, 10.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[3] = {0.0, 10.0, CmplxF(0, 0), 0.0};
 
-    rdoc.elements.resize(1);
+    rdoc.elements.resize(2);
     rdoc.elements[0].p[0] = 0;
     rdoc.elements[0].p[1] = 1;
     rdoc.elements[0].p[2] = 2;
     rdoc.elements[0].lbl = 0;
     rdoc.elements[0].blk = 0;
-    rdoc.elements[0].cx = 5.0;
+    rdoc.elements[0].cx = 20.0/3.0;
     rdoc.elements[0].cy = 10.0/3.0;
     rdoc.elements[0].B1 = CmplxF(0.5, 0);
     rdoc.elements[0].B2 = CmplxF(0.3, 0);
 
-    // B history: 3 steps with known Az values at the element centroid.
+    rdoc.elements[1].p[0] = 0;
+    rdoc.elements[1].p[1] = 2;
+    rdoc.elements[1].p[2] = 3;
+    rdoc.elements[1].lbl = 0;
+    rdoc.elements[1].blk = 0;
+    rdoc.elements[1].cx = 10.0/3.0;
+    rdoc.elements[1].cy = 20.0/3.0;
+    rdoc.elements[1].B1 = CmplxF(0.5, 0);
+    rdoc.elements[1].B2 = CmplxF(0.3, 0);
+
+    // B history: 3 steps with known Az values at the element centroids.
     // 1000 RPM, 2° per step → dt = 2/(6*1000) = 1/3000 s
     //
-    // Az values simulate varying vector potential as field changes:
-    //   Step 0: Az = 0.001 Wb/m
-    //   Step 1: Az = 0.003 Wb/m
-    //   Step 2: Az = 0.002 Wb/m
+    // Both elements share a large common-mode dAz/dt, but they also have
+    // equal-and-opposite local deviations. The mean-removed formulation
+    // should keep only the differential part.
     std::vector<BSnapshot> bHistory(3);
-    bHistory[0].add(5.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.001f);
-    bHistory[1].add(5.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.003f);
-    bHistory[2].add(5.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.002f);
+    bHistory[0].add(20.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.001f);
+    bHistory[0].add(10.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.002f);
+    bHistory[1].add(20.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.013f);
+    bHistory[1].add(10.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.0145f);
+    bHistory[2].add(20.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.022f);
+    bHistory[2].add(10.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.0225f);
 
     MotionParams motion;
     motion.isRotation = true;
@@ -997,38 +1539,187 @@ void TestDocument::azBasedSolidConductorLoss()
     IronLossResult result = computeIronLosses(bHistory, &rdoc, 100.0, 0.050, motion);
 
     QVERIFY(result.valid);
-    QCOMPARE((int)result.elementLosses.size(), 1);
+    QCOMPARE((int)result.elementLosses.size(), 2);
     QVERIFY2(result.elementLosses[0].loss_Wkg > 0.0,
              "Solid conductor with varying Az should have non-zero eddy loss");
+    QVERIFY2(result.elementLosses[1].loss_Wkg > 0.0,
+             "Second solid-conductor element should also have non-zero eddy loss");
 
-    // Manual calculation:
+    // Manual calculation with mean-removed dAz/dt:
     // dt = 2.0 / (6.0 * 1000) = 1/3000 s
     double dt = 2.0 / 6000.0;
 
-    // Step 0→1: dAz/dt = (0.003 - 0.001) / dt = 0.002 * 3000 = 6.0
-    double dAzdt_01 = (0.003 - 0.001) / dt;
-    // Step 1→2: dAz/dt = (0.002 - 0.003) / dt = -0.001 * 3000 = -3.0
-    double dAzdt_12 = (0.002 - 0.003) / dt;
+    // Element 0: [36, 27] V/m equivalent dAz/dt
+    // Element 1: [37.5, 24] V/m equivalent dAz/dt
+    // Block means (equal area): [36.75, 25.5]
+    double dAzdt0_01 = (0.013 - 0.001) / dt;
+    double dAzdt0_12 = (0.022 - 0.013) / dt;
+    double dAzdt1_01 = (0.0145 - 0.002) / dt;
+    double dAzdt1_12 = (0.0225 - 0.0145) / dt;
+    double mean01 = 0.5 * (dAzdt0_01 + dAzdt1_01);
+    double mean12 = 0.5 * (dAzdt0_12 + dAzdt1_12);
 
-    double meanDazdt2 = (dAzdt_01*dAzdt_01 + dAzdt_12*dAzdt_12) / 2.0;
-    // = (36.0 + 9.0) / 2 = 22.5
+    double meanDazdt2_elem0 =
+        ((dAzdt0_01 - mean01) * (dAzdt0_01 - mean01) +
+         (dAzdt0_12 - mean12) * (dAzdt0_12 - mean12)) / 2.0;
 
-    // P = sigma * <(dAz/dt)^2>
     double sigma_SI = 0.667e6;
-    double expectedLoss_Wm3 = sigma_SI * meanDazdt2;
+    double expectedLoss_Wm3 = sigma_SI * meanDazdt2_elem0;
     double expectedLoss_Wkg = expectedLoss_Wm3 / 7500.0;
 
-    double relErr = std::fabs(result.elementLosses[0].loss_Wkg - expectedLoss_Wkg)
-                    / expectedLoss_Wkg;
-    QVERIFY2(relErr < 0.01,
-             qPrintable(QString("Az-based loss: expected %1 W/kg, got %2 W/kg (err=%3%)")
-                 .arg(expectedLoss_Wkg).arg(result.elementLosses[0].loss_Wkg)
-                 .arg(relErr * 100.0)));
+    for (int i = 0; i < 2; i++) {
+        double relErr = std::fabs(result.elementLosses[i].loss_Wkg - expectedLoss_Wkg)
+                        / expectedLoss_Wkg;
+        QVERIFY2(relErr < 0.01,
+                 qPrintable(QString("Az-based loss elem %1: expected %2 W/kg, got %3 W/kg (err=%4%)")
+                     .arg(i).arg(expectedLoss_Wkg).arg(result.elementLosses[i].loss_Wkg)
+                     .arg(relErr * 100.0)));
+    }
 
-    // The loss should be much more modest than the old d^2 slab formula
-    // with problem depth would give
     QVERIFY2(result.elementLosses[0].loss_Wkg < 10000.0,
              "Az-based loss should be reasonable, not blown up by depth^2");
+}
+
+void TestDocument::azBasedSolidConductorLossSeparateBlocks()
+{
+    // Two independent solid-conductor blocks should each remove only their
+    // own common-mode dAz/dt. This matches moving solid rotor iron plus
+    // separate magnet pieces more closely than a global mean subtraction.
+    ResultsDocument rdoc;
+    rdoc.problemType = 0;
+    rdoc.lengthUnits = 1;   // mm
+    rdoc.lengthConv = 0.001;
+    rdoc.frequency = 0.0;
+    rdoc.depth = 0.050;
+
+    SolnMaterial mat;
+    mat.blockName = "Solid NdFeB";
+    mat.mu_x = 1.05;
+    mat.mu_y = 1.05;
+    mat.Cduct = 0.667;
+    mat.Lam_d = 0.0;
+    mat.Kh = 0.0;
+    mat.Kc = 0.0;
+    mat.Ke = 0.0;
+    mat.density = 7500.0;
+    rdoc.materials.push_back(mat);
+
+    SolnLabel lblA;
+    lblA.blockType = 0;
+    lblA.calculateLosses = true;
+    rdoc.labels.push_back(lblA);
+
+    SolnLabel lblB;
+    lblB.blockType = 0;
+    lblB.calculateLosses = true;
+    rdoc.labels.push_back(lblB);
+
+    // Two separate squares, each split into two equal-area triangles.
+    rdoc.nodes.resize(8);
+    rdoc.nodes[0] = {0.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[1] = {10.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[2] = {10.0, 10.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[3] = {0.0, 10.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[4] = {30.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[5] = {40.0, 0.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[6] = {40.0, 10.0, CmplxF(0, 0), 0.0};
+    rdoc.nodes[7] = {30.0, 10.0, CmplxF(0, 0), 0.0};
+
+    rdoc.elements.resize(4);
+
+    rdoc.elements[0].p[0] = 0;
+    rdoc.elements[0].p[1] = 1;
+    rdoc.elements[0].p[2] = 2;
+    rdoc.elements[0].lbl = 0;
+    rdoc.elements[0].blk = 0;
+    rdoc.elements[0].cx = 20.0 / 3.0;
+    rdoc.elements[0].cy = 10.0 / 3.0;
+    rdoc.elements[0].B1 = CmplxF(0.5, 0);
+    rdoc.elements[0].B2 = CmplxF(0.3, 0);
+
+    rdoc.elements[1].p[0] = 0;
+    rdoc.elements[1].p[1] = 2;
+    rdoc.elements[1].p[2] = 3;
+    rdoc.elements[1].lbl = 0;
+    rdoc.elements[1].blk = 0;
+    rdoc.elements[1].cx = 10.0 / 3.0;
+    rdoc.elements[1].cy = 20.0 / 3.0;
+    rdoc.elements[1].B1 = CmplxF(0.5, 0);
+    rdoc.elements[1].B2 = CmplxF(0.3, 0);
+
+    rdoc.elements[2].p[0] = 4;
+    rdoc.elements[2].p[1] = 5;
+    rdoc.elements[2].p[2] = 6;
+    rdoc.elements[2].lbl = 1;
+    rdoc.elements[2].blk = 0;
+    rdoc.elements[2].cx = 110.0 / 3.0;
+    rdoc.elements[2].cy = 10.0 / 3.0;
+    rdoc.elements[2].B1 = CmplxF(0.5, 0);
+    rdoc.elements[2].B2 = CmplxF(0.3, 0);
+
+    rdoc.elements[3].p[0] = 4;
+    rdoc.elements[3].p[1] = 6;
+    rdoc.elements[3].p[2] = 7;
+    rdoc.elements[3].lbl = 1;
+    rdoc.elements[3].blk = 0;
+    rdoc.elements[3].cx = 100.0 / 3.0;
+    rdoc.elements[3].cy = 20.0 / 3.0;
+    rdoc.elements[3].B1 = CmplxF(0.5, 0);
+    rdoc.elements[3].B2 = CmplxF(0.3, 0);
+
+    // Block A and block B share the same local differential dAz/dt, but
+    // block B has a much larger common-mode drift. Correct per-block mean
+    // removal should therefore give the same loss in all four elements.
+    std::vector<BSnapshot> bHistory(3);
+    bHistory[0].add(20.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.001f);
+    bHistory[0].add(10.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.002f);
+    bHistory[0].add(110.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.10000f);
+    bHistory[0].add(100.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.10200f);
+
+    bHistory[1].add(20.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.01300f);
+    bHistory[1].add(10.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.01450f);
+    bHistory[1].add(110.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.14975f);
+    bHistory[1].add(100.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.15225f);
+
+    bHistory[2].add(20.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.02200f);
+    bHistory[2].add(10.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.02250f);
+    bHistory[2].add(110.0f/3.0f, 10.0f/3.0f, 0.5f, 0.3f, 0.17925f);
+    bHistory[2].add(100.0f/3.0f, 20.0f/3.0f, 0.5f, 0.3f, 0.18275f);
+
+    MotionParams motion;
+    motion.isRotation = true;
+    motion.anglePerStep = 2.0;
+    motion.totalSteps = 2;
+    motion.rpm = 1000.0;
+
+    IronLossResult result = computeIronLosses(bHistory, &rdoc, 100.0, 0.050, motion);
+
+    QVERIFY(result.valid);
+    QCOMPARE((int)result.elementLosses.size(), 4);
+
+    double dt = 2.0 / 6000.0;
+    double dAzdt0_01 = (0.01300 - 0.00100) / dt;
+    double dAzdt0_12 = (0.02200 - 0.01300) / dt;
+    double dAzdt1_01 = (0.01450 - 0.00200) / dt;
+    double dAzdt1_12 = (0.02250 - 0.01450) / dt;
+    double mean01 = 0.5 * (dAzdt0_01 + dAzdt1_01);
+    double mean12 = 0.5 * (dAzdt0_12 + dAzdt1_12);
+    double meanDazdt2 =
+        ((dAzdt0_01 - mean01) * (dAzdt0_01 - mean01) +
+         (dAzdt0_12 - mean12) * (dAzdt0_12 - mean12)) / 2.0;
+
+    double expectedLoss_Wkg = (0.667e6 * meanDazdt2) / 7500.0;
+
+    for (int i = 0; i < 4; i++) {
+        QVERIFY2(result.elementLosses[i].loss_Wkg > 0.0,
+                 "Each solid-conductor element should retain finite eddy loss");
+        double relErr = std::fabs(result.elementLosses[i].loss_Wkg - expectedLoss_Wkg)
+                        / expectedLoss_Wkg;
+        QVERIFY2(relErr < 0.01,
+                 qPrintable(QString("Separate-block Az loss elem %1: expected %2 W/kg, got %3 W/kg (err=%4%)")
+                     .arg(i).arg(expectedLoss_Wkg).arg(result.elementLosses[i].loss_Wkg)
+                     .arg(relErr * 100.0)));
+    }
 }
 
 void TestDocument::steinmetzM19at60Hz()

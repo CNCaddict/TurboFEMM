@@ -30,6 +30,7 @@ struct SolnElement {
     int lbl = 0;             // block label index
     CmplxF B1, B2;           // element-average flux density (x,y)
     CmplxF b1[3], b2[3];    // smoothed nodal flux density
+    double ironLoss[3] = {0.0, 0.0, 0.0}; // smoothed nodal iron loss (W/kg)
     double magdir = 0.0;    // magnetization direction
     double cx = 0.0, cy = 0.0; // centroid
     double rsqr = 0.0;      // bounding radius squared
@@ -194,15 +195,19 @@ public:
     // Call to ensure smoothed B values and plot bounds are ready
     // (called automatically by overlay renderer before drawing).
     void ensureSmoothedB();
+    void ensureSmoothedIronLoss();
 
 private:
     void computeElementB();
     void computeSmoothedB();
+    void computeSmoothedIronLoss();
     void computePlotBounds();
     void buildAdjacency();
     void findBoundaryEdges();
 
     bool m_smoothedBReady = false;
+    mutable bool m_smoothedIronLossReady = false;
+    mutable int m_smoothedIronLossCount = -1;
 
     // Element B computation
     void getElementB(SolnElement &elm);

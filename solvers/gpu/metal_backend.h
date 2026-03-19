@@ -27,7 +27,9 @@ public:
     void downloadSolution(int n, double* V) override;
 
     void spmv(const double* X, double* Y) override;
+    double spmvDot(const double* X, double* Y) override;
     void precondJacobi(const double* X, double* Y) override;
+    double precondJacobiDot(const double* X, double* Y) override;
     double dot(const double* X, const double* Y) override;
     void axpy(double alpha, const double* X, double* Y) override;
     void scal(double alpha, double* Y) override;

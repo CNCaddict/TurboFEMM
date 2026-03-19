@@ -54,7 +54,7 @@ public:
 private:
     // Rasterize layers directly into m_image pixel buffer
     void rasterDensity();
-    void rasterElement(int elmIdx);
+    void rasterElement(int elmIdx, double bl, double bh);
     void rasterContours();
     void rasterMesh();
     void drawLegend(QPainter &p, int w, int h);
@@ -87,9 +87,6 @@ private:
     bool m_autoScale = true;
     double m_scaleMin = 0.0;
     double m_scaleMax = 1.0;
-
-    // Cached per-element iron loss value for getVertexValue()
-    mutable double m_cachedIronLoss = 0.0;
 
     // 2x SSAA buffer (High quality mode)
     QImage m_ssaaImage;

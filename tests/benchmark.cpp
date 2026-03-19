@@ -201,6 +201,13 @@ static void benchGPU()
             record(name, ms, iters, detail);
         }
 
+        // Fused SpMV + dot
+        {
+            char name[64]; snprintf(name, sizeof(name), "GPU SpMV+dot (n=%d)", n);
+            double ms = timeIt(iters, [&]() { gpu->spmvDot(P.data(), U.data()); });
+            record(name, ms, iters, detail);
+        }
+
         // AXPY
         {
             char name[64]; snprintf(name, sizeof(name), "GPU axpy (n=%d)", n);
@@ -215,18 +222,24 @@ static void benchGPU()
             record(name, ms, iters, detail);
         }
 
+        // Fused Jacobi + dot
+        {
+            char name[64]; snprintf(name, sizeof(name), "GPU jacobi+dot (n=%d)", n);
+            double ms = timeIt(iters, [&]() { gpu->precondJacobiDot(R.data(), Z.data()); });
+            record(name, ms, iters, detail);
+        }
+
         // Full PCG iteration body (simulates one iteration)
         {
             char name[64]; snprintf(name, sizeof(name), "GPU PCG iter (n=%d)", n);
             double ms = timeIt(iters, [&]() {
-                gpu->spmv(P.data(), U.data());
-                double pAp = gpu->dot(P.data(), U.data());
+                double pAp = gpu->spmvDot(P.data(), U.data());
                 double del = 0.001; // dummy
                 gpu->axpy(del, P.data(), V.data());
                 gpu->axpy(-del, U.data(), R.data());
-                gpu->precondJacobi(R.data(), Z.data());
-                double res_new = gpu->dot(Z.data(), R.data());
+                double res_new = gpu->precondJacobiDot(R.data(), Z.data());
                 (void)res_new;
+                (void)pAp;
                 gpu->scal(0.5, P.data());
                 gpu->axpy(1.0, Z.data(), P.data());
             });

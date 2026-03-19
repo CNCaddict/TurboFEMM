@@ -1,6 +1,7 @@
 // FEMM Qt 6 GUI — Geometry editor widget implementation
 #include "drawingwidget.h"
 #include "document.h"
+#include "femm_types.h"
 #include "resultsoverlay.h"
 #include "dialogs/blockpropsdlg.h"
 #include "dialogs/segpropsdlg.h"
@@ -263,22 +264,38 @@ void DrawingWidget::refreshDisplay()
     m_cachedFrame = grab();
 }
 
+QPixmap DrawingWidget::renderLiveFrame()
+{
+    const qreal dpr = devicePixelRatioF();
+    const QSize pixelSize(qRound(width() * dpr), qRound(height() * dpr));
+    QPixmap pixmap(pixelSize);
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(kColorBackground);
+
+    QPainter p(&pixmap);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    paintScene(p, false);
+    p.end();
+
+    return pixmap;
+}
+
 // ---------------------------------------------------------------
 // Paint
 // ---------------------------------------------------------------
 
-void DrawingWidget::paintEvent(QPaintEvent * /*event*/)
+void DrawingWidget::paintScene(QPainter &p, bool allowCachedFrame)
 {
     // During motion sweep: paint the cached frame snapshot so the display
     // always shows a correct overlay+geometry pair, even while the document
     // geometry has already been moved for the next solver step.
-    if (!m_cachedFrame.isNull()) {
-        QPainter p(this);
+    if (allowCachedFrame && !m_cachedFrame.isNull()) {
         p.drawPixmap(0, 0, m_cachedFrame);
         return;
     }
 
-    QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
 
     // Background
@@ -292,8 +309,18 @@ void DrawingWidget::paintEvent(QPaintEvent * /*event*/)
 
     // Results overlay (behind geometry lines)
     if (m_overlay && m_overlay->document()) {
+        const bool forceDocumentMesh = (m_slidingBand && m_slidingBand->active &&
+                                        m_doc && m_doc->hasMesh &&
+                                        m_overlay->showMesh());
+        const bool prevShowMesh = m_overlay->showMesh();
+        if (forceDocumentMesh)
+            m_overlay->setShowMesh(false);
         m_overlay->render(p, m_ox, m_oy, m_mag, width(), height());
+        if (forceDocumentMesh)
+            m_overlay->setShowMesh(prevShowMesh);
         p.setRenderHint(QPainter::Antialiasing, true);
+        if (forceDocumentMesh)
+            drawMesh(p);
     } else if (m_doc->hasMesh) {
         // Only draw geometry mesh when no results overlay
         drawMesh(p);
@@ -314,6 +341,12 @@ void DrawingWidget::paintEvent(QPaintEvent * /*event*/)
         p.setBrush(QColor(80, 120, 200, 30));
         p.drawRect(rc);
     }
+}
+
+void DrawingWidget::paintEvent(QPaintEvent * /*event*/)
+{
+    QPainter p(this);
+    paintScene(p, true);
 }
 
 void DrawingWidget::drawGrid(QPainter &p)
@@ -564,6 +597,21 @@ void DrawingWidget::drawMesh(QPainter &p)
         p.setPen(QPen(kColorMesh, 0.5));
         p.drawLines(lines.data(), (int)lines.size());
         p.setRenderHint(QPainter::Antialiasing, wasAA);
+    }
+
+    // Draw sliding band interface circles (dashed cyan)
+    if (m_slidingBand && m_slidingBand->active && m_slidingBand->isRotation) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        QPen bandPen(QColor(0, 200, 200), 1.5, Qt::DashLine);
+        p.setPen(bandPen);
+        p.setBrush(Qt::NoBrush);
+
+        // Inner circle
+        QPointF cScreen = drawingToScreen(m_slidingBand->cx, m_slidingBand->cy);
+        double rInnerPx = m_slidingBand->innerRadius * m_mag;
+        double rOuterPx = m_slidingBand->outerRadius * m_mag;
+        p.drawEllipse(cScreen, rInnerPx, rInnerPx);
+        p.drawEllipse(cScreen, rOuterPx, rOuterPx);
     }
 }
 
@@ -908,6 +956,7 @@ void DrawingWidget::mouseMoveEvent(QMouseEvent *event)
         update();
         return;
     }
+
 }
 
 void DrawingWidget::mouseReleaseEvent(QMouseEvent *event)

@@ -564,6 +564,53 @@ void ResultsDocument::computeSmoothedB()
     }
 }
 
+void ResultsDocument::computeSmoothedIronLoss()
+{
+    const int numElm = (int)elements.size();
+    const bool haveLoss = ((int)ironLoss_Wkg.size() == numElm);
+
+    for (auto &elm : elements) {
+        for (int j = 0; j < 3; j++)
+            elm.ironLoss[j] = 0.0;
+    }
+
+    if (!haveLoss)
+        return;
+
+    for (int ei = 0; ei < numElm; ei++) {
+        auto &elm = elements[ei];
+        const double selfLoss = ironLoss_Wkg[ei];
+
+        for (int j = 0; j < 3; j++) {
+            int ni = elm.p[j];
+            double nx = nodes[ni].x, ny = nodes[ni].y;
+
+            double sumLoss = 0.0;
+            double sumW = 0.0;
+
+            for (int adjEi : m_conList[ni]) {
+                if (adjEi < 0 || adjEi >= numElm) continue;
+
+                const auto &adj = elements[adjEi];
+                // Keep smoothing within the same region/material so we don't
+                // blur across physical boundaries.
+                if (adj.lbl != elm.lbl || adj.blk != elm.blk) continue;
+
+                double dx = adj.cx - nx;
+                double dy = adj.cy - ny;
+                double dist = std::sqrt(dx * dx + dy * dy);
+                if (dist < 1e-20) dist = 1e-20;
+                double w = 1.0 / dist;
+
+                sumLoss += w * ironLoss_Wkg[adjEi];
+                sumW += w;
+            }
+
+            elm.ironLoss[j] = (sumW > 0.0) ? (sumLoss / sumW) : selfLoss;
+        }
+    }
+}
+
 // ---------------------------------------------------------------
 // Lazy smoothed B + plot bounds (called before rendering)
 // ---------------------------------------------------------------
@@ -574,6 +621,17 @@ void ResultsDocument::ensureSmoothedB()
     m_smoothedBReady = true;
     computeSmoothedB();
     computePlotBounds();
+}
+
+void ResultsDocument::ensureSmoothedIronLoss()
+{
+    int count = (int)ironLoss_Wkg.size();
+    if (m_smoothedIronLossReady && m_smoothedIronLossCount == count)
+        return;
+
+    m_smoothedIronLossReady = true;
+    m_smoothedIronLossCount = count;
+    computeSmoothedIronLoss();
 }
 
 // ---------------------------------------------------------------

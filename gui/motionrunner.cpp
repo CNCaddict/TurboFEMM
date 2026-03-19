@@ -30,9 +30,32 @@ public:
     ResultsDocument *results = nullptr;
     bool success = false;
 
+    // Sliding band: if useExistingMesh is true, skip mesh generation and
+    // call solveExistingMesh() with the provided edges.
+    bool useExistingMesh = false;
+    std::vector<MeshEdge> edges;   // edges for solveExistingMesh
+
+    // Sliding band step 0: generate mesh with band circles, then solve.
+    SlidingBand *bandSetup = nullptr;  // non-null → inject interface circles
+
 protected:
     void run() override {
-        success = solver->solve(doc, results);
+        if (useExistingMesh) {
+            // Steps 1+: mesh already prepared on main thread, just solve
+            success = solver->solveExistingMesh(doc, edges, results);
+        } else if (bandSetup) {
+            // Step 0 with band: generate mesh with interface circles, then solve
+            MeshGenerator meshGen;
+            std::vector<MeshEdge> meshEdges;
+            if (!meshGen.generateMeshInProcess(doc, meshEdges, bandSetup)) {
+                success = false;
+                return;
+            }
+            success = solver->solveExistingMesh(doc, meshEdges, results);
+        } else {
+            // Normal: full mesh generation + solve
+            success = solver->solve(doc, results);
+        }
     }
 };
 
@@ -40,39 +63,225 @@ protected:
 #define M_PI 3.14159265358979323846
 #endif
 
+namespace {
+
+static bool isFerromagneticSolidLossMaterial(const SolnMaterial &mat)
+{
+    bool hasSteinmetz = (mat.Kh > 0 || mat.Kc > 0 || mat.Ke > 0);
+    bool hasConductivity = (!hasSteinmetz && mat.Cduct > 0);
+    bool isSolid = (mat.Lam_d <= 0.0);
+    double muMax = std::max(std::fabs(mat.mu_x), std::fabs(mat.mu_y));
+    bool hasBhCurve = (mat.bhPoints > 0);
+    bool highMu = (muMax > 5.0);
+    bool permanentMagnet = (std::fabs(mat.H_c) > 1e-6);
+    return hasConductivity && isSolid && !permanentMagnet && (hasBhCurve || highMu);
+}
+
+static void captureIronLossSnapshot(const ResultsDocument *rdoc,
+                                    const MotionConfig &config,
+                                    BSnapshot &snap,
+                                    int *lossElmCountOut = nullptr)
+{
+    if (!rdoc)
+        return;
+
+    int lossElmCount = 0;
+    for (int i = 0; i < (int)rdoc->elements.size(); i++) {
+        const auto &elm = rdoc->elements[i];
+        int lbl = elm.lbl;
+        if (lbl < 0 || lbl >= (int)rdoc->labels.size()) continue;
+        if (!rdoc->labels[lbl].calculateLosses) continue;
+        lossElmCount++;
+
+        float azCentroid = 0.0f;
+        if (elm.p[0] >= 0 && elm.p[0] < (int)rdoc->nodes.size() &&
+            elm.p[1] >= 0 && elm.p[1] < (int)rdoc->nodes.size() &&
+            elm.p[2] >= 0 && elm.p[2] < (int)rdoc->nodes.size()) {
+            azCentroid = (float)((rdoc->nodes[elm.p[0]].A.real() +
+                                  rdoc->nodes[elm.p[1]].A.real() +
+                                  rdoc->nodes[elm.p[2]].A.real()) / 3.0);
+        }
+        snap.add((float)elm.cx, (float)elm.cy,
+                 (float)elm.B1.real(), (float)elm.B2.real(), azCentroid, lbl);
+    }
+
+    if (lossElmCountOut)
+        *lossElmCountOut = lossElmCount;
+
+    if (!(config.isRotation && config.groupNumber > 0))
+        return;
+
+    auto wrapAngle = [](double a) {
+        while (a < 0.0) a += 2.0 * M_PI;
+        while (a >= 2.0 * M_PI) a -= 2.0 * M_PI;
+        return a;
+    };
+
+    for (int lbl = 0; lbl < (int)rdoc->labels.size(); lbl++) {
+        const auto &label = rdoc->labels[lbl];
+        if (!label.calculateLosses) continue;
+        if (label.inGroup != config.groupNumber) continue;
+
+        int matIdx = label.blockType;
+        if (matIdx < 0 || matIdx >= (int)rdoc->materials.size()) continue;
+        const auto &mat = rdoc->materials[matIdx];
+        if (!isFerromagneticSolidLossMaterial(mat))
+            continue;
+
+        std::vector<double> nodeRadii;
+        int numLabelElements = 0;
+        for (const auto &elm : rdoc->elements) {
+            if (elm.lbl != lbl) continue;
+            numLabelElements++;
+            for (int k = 0; k < 3; k++) {
+                int p = elm.p[k];
+                if (p < 0 || p >= (int)rdoc->nodes.size()) continue;
+                double dx = rdoc->nodes[p].x - config.cx;
+                double dy = rdoc->nodes[p].y - config.cy;
+                nodeRadii.push_back(std::sqrt(dx * dx + dy * dy));
+            }
+        }
+
+        if (numLabelElements < 8 || nodeRadii.empty())
+            continue;
+
+        double rMin = *std::min_element(nodeRadii.begin(), nodeRadii.end());
+        double rMax = *std::max_element(nodeRadii.begin(), nodeRadii.end());
+        double thickness = rMax - rMin;
+        if (thickness <= 1e-9)
+            continue;
+
+        double rInnerSample = rMin + 0.20 * thickness;
+        double rOuterSample = rMax - 0.20 * thickness;
+        if (rOuterSample <= rInnerSample)
+            continue;
+
+        int numSectors = std::max(8, std::min(48, numLabelElements / 6));
+        for (int sec = 0; sec < numSectors; sec++) {
+            double ang = wrapAngle((2.0 * M_PI) * ((double)sec + 0.5) / (double)numSectors);
+            for (double rSample : {rInnerSample, rOuterSample}) {
+                double x = config.cx + rSample * std::cos(ang);
+                double y = config.cy + rSample * std::sin(ang);
+                PointValues pv = rdoc->getPointValues(x, y);
+                if (!pv.valid)
+                    continue;
+                snap.add((float)x, (float)y,
+                         (float)pv.B1.real(), (float)pv.B2.real(),
+                         (float)pv.A.real(), lbl);
+            }
+        }
+    }
+}
+
+static bool buildRotorProbeSpec(const ResultsDocument *rdoc,
+                                const MotionConfig &config,
+                                int &outLabelIndex,
+                                double &outRadius,
+                                double &outTheta0Deg)
+{
+    if (!rdoc || !config.isRotation || config.groupNumber <= 0)
+        return false;
+
+    for (int lbl = 0; lbl < (int)rdoc->labels.size(); lbl++) {
+        const auto &label = rdoc->labels[lbl];
+        if (label.inGroup != config.groupNumber)
+            continue;
+
+        int matIdx = label.blockType;
+        if (matIdx < 0 || matIdx >= (int)rdoc->materials.size())
+            continue;
+        const auto &mat = rdoc->materials[matIdx];
+        if (!isFerromagneticSolidLossMaterial(mat))
+            continue;
+
+        std::vector<double> nodeRadii;
+        for (const auto &elm : rdoc->elements) {
+            if (elm.lbl != lbl)
+                continue;
+            for (int k = 0; k < 3; k++) {
+                int p = elm.p[k];
+                if (p < 0 || p >= (int)rdoc->nodes.size())
+                    continue;
+                double dx = rdoc->nodes[p].x - config.cx;
+                double dy = rdoc->nodes[p].y - config.cy;
+                nodeRadii.push_back(std::sqrt(dx * dx + dy * dy));
+            }
+        }
+
+        if (nodeRadii.size() < 6)
+            continue;
+
+        double rMin = *std::min_element(nodeRadii.begin(), nodeRadii.end());
+        double rMax = *std::max_element(nodeRadii.begin(), nodeRadii.end());
+        if (rMax - rMin <= 1e-9)
+            continue;
+
+        double dx = label.x - config.cx;
+        double dy = label.y - config.cy;
+        outLabelIndex = lbl;
+        outRadius = 0.5 * (rMin + rMax);
+        outTheta0Deg = std::atan2(dy, dx) * 180.0 / M_PI;
+        return true;
+    }
+
+    return false;
+}
+
+static bool sampleRotorProbe(const ResultsDocument *rdoc,
+                             const MotionConfig &config,
+                             bool probeValid,
+                             double probeRadius,
+                             double probeTheta0Deg,
+                             int step,
+                             double &outBr,
+                             double &outBt)
+{
+    if (!rdoc || !probeValid || !config.isRotation)
+        return false;
+
+    double thetaDeg = probeTheta0Deg + config.angle * (double)step;
+    double thetaRad = thetaDeg * M_PI / 180.0;
+    double x = config.cx + probeRadius * std::cos(thetaRad);
+    double y = config.cy + probeRadius * std::sin(thetaRad);
+
+    PointValues pv = rdoc->getPointValues(x, y);
+    if (!pv.valid)
+        return false;
+
+    double bx = pv.B1.real();
+    double by = pv.B2.real();
+    outBr = bx * std::cos(thetaRad) + by * std::sin(thetaRad);
+    outBt = -bx * std::sin(thetaRad) + by * std::cos(thetaRad);
+    return true;
+}
+
+} // namespace
+
 // ---------------------------------------------------------------
 // Minimal GIF89a encoder (no external dependencies)
 // ---------------------------------------------------------------
 
-// Write a GIF87a/89a animated GIF from a sequence of QImages.
-// Uses a simple median-cut palette per frame + local color tables.
-// Supports disposal and frame delay for animation.
+// Write a GIF89a animated GIF from a sequence of QImages.
+// Each frame gets its own local palette so narrow color bands do not
+// "pop" at the loop seam due to one coarse global quantizer.
 
 namespace {
 
-// Simple color quantization: uniform 6-6-6 palette (216 colors)
-// Fast and avoids complex median-cut for this use case.
-static void buildUniformPalette(QVector<QRgb> &palette)
+static int nextPowerOfTwo(int value)
 {
-    palette.clear();
-    palette.reserve(216);
-    for (int r = 0; r < 6; r++)
-        for (int g = 0; g < 6; g++)
-            for (int b = 0; b < 6; b++)
-                palette.append(qRgb(r * 51, g * 51, b * 51));
-    // Pad to 256 entries (GIF requires power-of-2 color table)
-    while (palette.size() < 256)
-        palette.append(qRgb(0, 0, 0));
+    int pow2 = 1;
+    while (pow2 < value)
+        pow2 <<= 1;
+    return pow2;
 }
 
-static int findClosestColor(const QVector<QRgb> &palette, QRgb pixel)
+static int tableExponent(int tableSize)
 {
-    int r = qRed(pixel), g = qGreen(pixel), b = qBlue(pixel);
-    // Fast lookup for uniform 6-6-6 palette
-    int ri = qBound(0, (r + 25) / 51, 5);
-    int gi = qBound(0, (g + 25) / 51, 5);
-    int bi = qBound(0, (b + 25) / 51, 5);
-    return ri * 36 + gi * 6 + bi;
+    int bits = 0;
+    int size = qMax(2, tableSize);
+    while ((1 << bits) < size)
+        ++bits;
+    return qMax(0, bits - 1);
 }
 
 // LZW encoder for GIF
@@ -180,9 +389,9 @@ struct LZWEncoder {
         output.append((char)0);  // block terminator
     }
 
-    QByteArray encode(const QByteArray &indices)
+    QByteArray encode(const QByteArray &indices, int minBits)
     {
-        init(8);  // 8-bit min code size for 256-color images
+        init(qMax(2, minBits));
 
         emitCode(clearCode);
 
@@ -230,27 +439,15 @@ static QByteArray encodeAnimatedGIF(const std::vector<QImage> &frames, int delay
     int W = frames[0].width();
     int H = frames[0].height();
 
-    // Build global palette (uniform 6-6-6)
-    QVector<QRgb> palette;
-    buildUniformPalette(palette);
-
     QByteArray gif;
 
     // --- Header ---
     gif.append("GIF89a", 6);
     writeLE16(gif, (uint16_t)W);
     writeLE16(gif, (uint16_t)H);
-    gif.append((char)0xF7);  // GCT flag=1, color res=7, sort=0, GCT size=7 (256 colors)
+    gif.append((char)0x70);  // no GCT, color resolution=7
     gif.append((char)0);     // background color index
     gif.append((char)0);     // pixel aspect ratio
-
-    // --- Global Color Table (256 * 3 bytes) ---
-    for (int i = 0; i < 256; i++) {
-        QRgb c = palette[i];
-        gif.append((char)qRed(c));
-        gif.append((char)qGreen(c));
-        gif.append((char)qBlue(c));
-    }
 
     // --- NETSCAPE Application Extension (for looping) ---
     gif.append((char)0x21);  // extension introducer
@@ -269,6 +466,23 @@ static QByteArray encodeAnimatedGIF(const std::vector<QImage> &frames, int delay
         if (img.width() != W || img.height() != H)
             img = img.scaled(W, H, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
+        QImage indexed = img.convertToFormat(
+            QImage::Format_Indexed8,
+            Qt::DiffuseDither | Qt::PreferDither);
+        if (indexed.isNull())
+            indexed = img.convertToFormat(QImage::Format_Indexed8, Qt::AutoColor);
+
+        QVector<QRgb> palette = indexed.colorTable();
+        if (palette.isEmpty()) {
+            palette = { qRgb(0, 0, 0), qRgb(255, 255, 255) };
+            indexed.setColorTable(palette);
+        }
+
+        const int actualTableSize = nextPowerOfTwo(qMax(2, palette.size()));
+        const int minCodeSize = qMax(2, tableExponent(actualTableSize) + 1);
+        while (palette.size() < actualTableSize)
+            palette.append(qRgb(0, 0, 0));
+
         // Graphic Control Extension
         gif.append((char)0x21);  // extension introducer
         gif.append((char)0xF9);  // graphic control
@@ -284,22 +498,29 @@ static QByteArray encodeAnimatedGIF(const std::vector<QImage> &frames, int delay
         writeLE16(gif, 0);       // top
         writeLE16(gif, (uint16_t)W);
         writeLE16(gif, (uint16_t)H);
-        gif.append((char)0x00);  // no local color table, not interlaced
+        gif.append((char)(0x80 | tableExponent(actualTableSize)));  // local color table
 
-        // Quantize pixels to indices
+        // Local color table
+        for (int i = 0; i < actualTableSize; i++) {
+            QRgb c = palette[i];
+            gif.append((char)qRed(c));
+            gif.append((char)qGreen(c));
+            gif.append((char)qBlue(c));
+        }
+
+        // Use the indexed pixels directly so the GIF encoder preserves the
+        // frame-local palette chosen by Qt rather than re-quantizing again.
         QByteArray indices;
         indices.resize(W * H);
         for (int y = 0; y < H; y++) {
-            const QRgb *line = reinterpret_cast<const QRgb *>(img.constScanLine(y));
-            for (int x = 0; x < W; x++) {
-                indices[y * W + x] = (char)findClosestColor(palette, line[x]);
-            }
+            const uchar *line = indexed.constScanLine(y);
+            std::memcpy(indices.data() + y * W, line, size_t(W));
         }
 
         // LZW encode
-        gif.append((char)8);  // LZW minimum code size
+        gif.append((char)minCodeSize);
         LZWEncoder enc;
-        QByteArray lzwData = enc.encode(indices);
+        QByteArray lzwData = enc.encode(indices, minCodeSize);
         gif.append(lzwData);
     }
 
@@ -342,9 +563,9 @@ ResultsDocument *MotionRunner::takeLastResults()
 }
 
 void MotionRunner::start(const MotionConfig &config,
-                          FemmeDocument *doc,
-                          DrawingWidget *dw,
-                          MeshGenerator *meshGen,
+                         FemmeDocument *doc,
+                         DrawingWidget *dw,
+                         MeshGenerator *meshGen,
                           SolverRunner *solver,
                           ResultsOverlayRenderer *overlay)
 {
@@ -356,6 +577,13 @@ void MotionRunner::start(const MotionConfig &config,
     m_meshGen = meshGen;
     m_solver = solver;
     m_overlay = overlay;
+    m_captureScaleInitialized = false;
+    m_captureScaleMin = 0.0;
+    m_captureScaleMax = 1.0;
+    m_rotorProbeValid = false;
+    m_rotorProbeLabelIndex = -1;
+    m_rotorProbeRadius = 0.0;
+    m_rotorProbeTheta0Deg = 0.0;
     m_running = true;
     m_aborting = false;
     m_currentStep = 0;
@@ -452,6 +680,19 @@ void MotionRunner::start(const MotionConfig &config,
         emit progress(tr("=== End Motor Config ==="));
     }
 
+    // --- Sliding band setup ---
+    // Disabled at runtime: the current implementation is still not reliable
+    // enough for production sweeps. Use the stable full-remesh path until
+    // a replacement subdomain-remesh approach is ready.
+    m_useSlidingBand = false;
+    m_slidingBand = SlidingBand{};
+    double bandInner = doc->slidingBandInnerRadius;
+    double bandOuter = doc->slidingBandOuterRadius;
+    if (bandInner > 0 || bandOuter > 0) {
+        emit progress(tr("Sliding band is temporarily disabled — using full remesh each step"));
+    }
+    if (m_dw) m_dw->setSlidingBand(nullptr);
+
     // Run step 0 (initial position — no transform, just solve)
     runNextStep();
 }
@@ -498,8 +739,10 @@ void MotionRunner::runNextStep()
         .arg(m_currentStep).arg(m_config.numSteps));
     emit stepCompleted(m_currentStep, m_config.numSteps);
 
-    // Apply transform (skip for step 0 — initial position)
-    if (m_currentStep > 0) {
+    // Apply transform (skip for step 0 — initial position).
+    // With a sliding band, geometry stays at the initial position and only
+    // the mesh nodes in the moving region are updated per step.
+    if (m_currentStep > 0 && !m_useSlidingBand) {
         m_doc->selectGroup(m_config.groupNumber);
         if (m_config.isRotation)
             m_doc->rotateSelected(m_config.cx, m_config.cy, m_config.angle);
@@ -558,6 +801,103 @@ void MotionRunner::runNextStep()
     m_solveThread->solver = m_inProcessSolver;
     m_solveThread->doc = m_doc;
     m_solveThread->results = m_pendingResults;
+
+    if (m_useSlidingBand && m_currentStep == 0) {
+        // Step 0: generate mesh with constrained interface circles.
+        emit progress(tr("[SlidingBand] Step 0: mesh with constrained interface circles"));
+        m_solveThread->bandSetup = &m_slidingBand;
+    } else if (m_useSlidingBand && m_currentStep > 0) {
+        // Steps 1+: rotate rotor mesh nodes, remesh band, solve existing mesh
+        emit progress(tr("[SlidingBand] Step %1: band-only remesh (%2 rotor nodes, "
+                         "bandStart=%3, totalElems=%4)")
+                      .arg(m_currentStep)
+                      .arg(m_slidingBand.rotorNodeIndices.size())
+                      .arg(m_slidingBand.bandElementStart)
+                      .arg(m_doc->meshElements.size()));
+        double angleDeg = m_config.angle;
+        double angleRad = angleDeg * M_PI / 180.0;
+        double cosA = std::cos(angleRad);
+        double sinA = std::sin(angleRad);
+        double cx = m_slidingBand.cx;
+        double cy = m_slidingBand.cy;
+
+        // Rotate rotor mesh nodes
+        for (int ni : m_slidingBand.rotorNodeIndices) {
+            double rx = m_doc->meshNodes[ni].x - cx;
+            double ry = m_doc->meshNodes[ni].y - cy;
+            m_doc->meshNodes[ni].x = cx + rx * cosA - ry * sinA;
+            m_doc->meshNodes[ni].y = cy + rx * sinA + ry * cosA;
+        }
+        // Rotate the rotor-side interface nodes
+        const auto &ifaceNodes = m_slidingBand.rotorIsInside
+            ? m_slidingBand.innerCircleNodeIndices
+            : m_slidingBand.outerCircleNodeIndices;
+        for (int ni : ifaceNodes) {
+            double rx = m_doc->meshNodes[ni].x - cx;
+            double ry = m_doc->meshNodes[ni].y - cy;
+            m_doc->meshNodes[ni].x = cx + rx * cosA - ry * sinA;
+            m_doc->meshNodes[ni].y = cy + rx * sinA + ry * cosA;
+        }
+        m_slidingBand.cumulativeAngle += angleDeg;
+
+        // Regenerate band elements
+        MeshGenerator bandGen;
+        bandGen.remeshBand(m_doc, m_slidingBand, m_slidingBandEdges);
+
+        // Validate mesh integrity before solving
+        int numNodes = (int)m_doc->meshNodes.size();
+        // Count valid labels (non-"No Mesh" block labels, 1-based in Triangle output)
+        int numLabels = 0;
+        for (const auto &blk : m_doc->blockLabels)
+            if (blk.blockType != "<No Mesh>") numLabels++;
+
+        bool meshValid = true;
+        for (int e = 0; e < (int)m_doc->meshElements.size(); e++) {
+            const auto &el = m_doc->meshElements[e];
+            for (int k = 0; k < 3; k++) {
+                if (el.p[k] < 0 || el.p[k] >= numNodes) {
+                    emit progress(tr("MESH ERROR: element %1 has node index %2 "
+                                     "(numNodes=%3) — disabling sliding band")
+                                  .arg(e).arg(el.p[k]).arg(numNodes));
+                    meshValid = false;
+                    break;
+                }
+            }
+            if (!meshValid) break;
+            // Check element label is not wildly out of range
+            // (label=0 is OK — solver maps it to default label;
+            //  label 1..numLabels are valid Triangle region attributes)
+            if (el.label > numLabels) {
+                emit progress(tr("MESH ERROR: element %1 has label %2 "
+                                 "(numLabels=%3) — disabling sliding band")
+                              .arg(e).arg(el.label).arg(numLabels));
+                meshValid = false;
+                break;
+            }
+        }
+        for (const auto &edge : m_slidingBandEdges) {
+            if (edge.n0 < 0 || edge.n0 >= numNodes ||
+                edge.n1 < 0 || edge.n1 >= numNodes) {
+                emit progress(tr("MESH ERROR: edge has node %1→%2 (numNodes=%3)")
+                              .arg(edge.n0).arg(edge.n1).arg(numNodes));
+                meshValid = false;
+                break;
+            }
+        }
+        if (!meshValid) {
+            // Fall back to full remesh
+            m_useSlidingBand = false;
+            if (m_dw) m_dw->setSlidingBand(nullptr);
+            syncGeometryToStep(m_currentStep);
+        } else {
+            // Solve using existing mesh (no Triangle call)
+            m_solveThread->useExistingMesh = true;
+            m_solveThread->edges = m_slidingBandEdges;
+        }
+    } else {
+        emit progress(tr("[SlidingBand] Step %1: FULL REMESH (sliding band not active)").arg(m_currentStep));
+    }
+
     connect(m_solveThread, &QThread::finished,
             this, &MotionRunner::onInProcessSolveFinished);
     m_solveThread->start();
@@ -587,6 +927,25 @@ void MotionRunner::onInProcessSolveFinished()
     }
 
     if (!success) {
+        // If sliding band solve failed, try disabling it and retrying with full remesh
+        if (m_useSlidingBand) {
+            emit progress(tr("Sliding band solve failed at step %1 — retrying with full remesh")
+                          .arg(m_currentStep));
+            m_useSlidingBand = false;
+            if (m_dw) m_dw->setSlidingBand(nullptr);
+            syncGeometryToStep(m_currentStep);
+            delete rdoc;
+            // Re-run this step with full remesh (no band circles)
+            m_pendingResults = new ResultsDocument(this);
+            m_solveThread = new SolveThread;
+            m_solveThread->solver = m_inProcessSolver;
+            m_solveThread->doc = m_doc;
+            m_solveThread->results = m_pendingResults;
+            connect(m_solveThread, &QThread::finished,
+                    this, &MotionRunner::onInProcessSolveFinished);
+            m_solveThread->start();
+            return;
+        }
         emit progress(tr("Solve failed at step %1: %2")
             .arg(m_currentStep).arg(m_inProcessSolver->lastError()));
         delete rdoc;
@@ -601,9 +960,47 @@ void MotionRunner::onInProcessSolveFinished()
         return;
     }
 
+    // After step 0 with sliding band: classify mesh into rotor/band/stator
+    if (m_useSlidingBand && m_currentStep == 0) {
+        MeshGenerator classifier;
+        connect(&classifier, &MeshGenerator::progress,
+                this, &MotionRunner::progress);
+        if (!classifier.classifyMeshForSlidingBand(m_doc, m_slidingBand)) {
+            emit progress(tr("Sliding band classification failed — falling back to full remesh"));
+            m_useSlidingBand = false;
+        } else {
+            emit progress(tr("[SlidingBand] Classification OK: %1 rotor nodes, "
+                             "%2 inner iface, %3 outer iface, bandStart=%4, bandCount=%5, "
+                             "fixedEdges=%6, totalElems=%7")
+                          .arg(m_slidingBand.rotorNodeIndices.size())
+                          .arg(m_slidingBand.innerCircleNodeIndices.size())
+                          .arg(m_slidingBand.outerCircleNodeIndices.size())
+                          .arg(m_slidingBand.bandElementStart)
+                          .arg(m_slidingBand.bandElementCount)
+                          .arg(m_slidingBand.fixedEdges.size())
+                          .arg(m_doc->meshElements.size()));
+            // Store edges from initial mesh for step 1+
+            m_slidingBandEdges = m_slidingBand.fixedEdges;
+        }
+    }
+
     // Update overlay for visualization
     if (m_overlay) {
         m_overlay->setDocument(rdoc);
+    }
+
+    if (!m_rotorProbeValid) {
+        m_rotorProbeValid = buildRotorProbeSpec(
+            rdoc, m_config,
+            m_rotorProbeLabelIndex,
+            m_rotorProbeRadius,
+            m_rotorProbeTheta0Deg);
+        if (m_rotorProbeValid) {
+            emit progress(tr("Rotor-frame probe: label=%1 r=%2 theta0=%3°")
+                .arg(m_rotorProbeLabelIndex)
+                .arg(m_rotorProbeRadius, 0, 'f', 4)
+                .arg(m_rotorProbeTheta0Deg, 0, 'f', 2));
+        }
     }
 
     // Compute summary
@@ -625,6 +1022,14 @@ void MotionRunner::onInProcessSolveFinished()
     sr.Ia = m_stepIa;
     sr.Ib = m_stepIb;
     sr.Ic = m_stepIc;
+    sr.hasRotorProbe = sampleRotorProbe(
+        rdoc, m_config,
+        m_rotorProbeValid,
+        m_rotorProbeRadius,
+        m_rotorProbeTheta0Deg,
+        m_currentStep,
+        sr.rotorProbeBr,
+        sr.rotorProbeBt);
 
     // Maxwell stress tensor torque (motor + rotation mode)
     if (m_config.motorEnabled && m_config.isRotation && m_config.csvForceTorque) {
@@ -679,24 +1084,7 @@ void MotionRunner::onInProcessSolveFinished()
     if (m_config.calculateLosses) {
         BSnapshot snap;
         int lossElmCount = 0;
-        for (int i = 0; i < (int)rdoc->elements.size(); i++) {
-            const auto &elm = rdoc->elements[i];
-            int lbl = elm.lbl;
-            if (lbl < 0 || lbl >= (int)rdoc->labels.size()) continue;
-            if (!rdoc->labels[lbl].calculateLosses) continue;
-            lossElmCount++;
-            // Compute Az at centroid as average of 3 nodal values
-            float azCentroid = 0.0f;
-            if (elm.p[0] >= 0 && elm.p[0] < (int)rdoc->nodes.size() &&
-                elm.p[1] >= 0 && elm.p[1] < (int)rdoc->nodes.size() &&
-                elm.p[2] >= 0 && elm.p[2] < (int)rdoc->nodes.size()) {
-                azCentroid = (float)((rdoc->nodes[elm.p[0]].A.real() +
-                                      rdoc->nodes[elm.p[1]].A.real() +
-                                      rdoc->nodes[elm.p[2]].A.real()) / 3.0);
-            }
-            snap.add((float)elm.cx, (float)elm.cy,
-                     (float)elm.B1.real(), (float)elm.B2.real(), azCentroid);
-        }
+        captureIronLossSnapshot(rdoc, m_config, snap, &lossElmCount);
         m_bHistory.push_back(std::move(snap));
 
         // Diagnostic at first step
@@ -760,6 +1148,9 @@ void MotionRunner::onInProcessSolveFinished()
 
             if (freq > 0) {
                 emit progress(tr("Computing iron losses at %.1f Hz...").arg(freq));
+                if (m_config.accurateSolidLosses) {
+                    emit progress(tr("Accurate solid rotor loss mode enabled (slower boundary-driven diffusion pass)"));
+                }
 
                 // Build motion params for rotor-aware B(t) lookup
                 MotionParams motionParams;
@@ -773,10 +1164,13 @@ void MotionRunner::onInProcessSolveFinished()
                 motionParams.rpm = m_config.motorRPM;
                 motionParams.totalSteps = m_config.numSteps;
 
+                IronLossOptions lossOptions;
+                lossOptions.accurateSolidLosses = m_config.accurateSolidLosses;
+
                 // depth is stored in original length units — convert to metres
                 double depthM = lastDoc->depth * lastDoc->lengthConv;
                 m_ironLossResult = computeIronLosses(
-                    m_bHistory, lastDoc, freq, depthM, motionParams);
+                    m_bHistory, lastDoc, freq, depthM, motionParams, lossOptions);
 
                 // Populate per-element loss data on the ResultsDocument for heatmap
                 int numElm = (int)lastDoc->elements.size();
@@ -804,33 +1198,13 @@ void MotionRunner::onInProcessSolveFinished()
                 }
                 // Capture iron loss heatmap to offscreen image
                 if (m_ironLossResult.valid && m_overlay && m_dw) {
-                    // Save and set overlay to iron loss mode
-                    DensityType prevDensity = m_overlay->densityType();
-                    bool prevLegend = m_overlay->showLegend();
-                    m_overlay->setShowDensity(DensityType::IronLoss);
-                    m_overlay->setShowLegend(true);
-
-                    // Render to offscreen QImage using the current view transform
-                    int w = m_dw->width();
-                    int h = m_dw->height();
-                    if (w > 0 && h > 0) {
-                        QImage offscreen(w, h, QImage::Format_ARGB32_Premultiplied);
-                        offscreen.fill(Qt::white);
-                        QPainter painter(&offscreen);
-                        painter.setRenderHint(QPainter::Antialiasing);
-                        m_overlay->render(painter, m_dw->viewOx(), m_dw->viewOy(),
-                                          m_dw->viewMag(), w, h);
-                        painter.end();
-
+                    QPixmap ironLossFrame = renderFrameForDensity(DensityType::IronLoss, true);
+                    if (!ironLossFrame.isNull()) {
                         QString heatmapPath = QString("%1/ironloss_%2.png")
                             .arg(m_config.outputDir, m_timestamp);
-                        offscreen.save(heatmapPath, "PNG");
+                        ironLossFrame.save(heatmapPath, "PNG");
                         emit progress(tr("Iron loss heatmap saved: %1").arg(heatmapPath));
                     }
-
-                    // Restore previous overlay state
-                    m_overlay->setShowDensity(prevDensity);
-                    m_overlay->setShowLegend(prevLegend);
                 }
             } else {
                 emit progress(tr("Iron loss skipped: operating frequency is 0 Hz.\n"
@@ -936,6 +1310,20 @@ void MotionRunner::onSolverFinished(bool success)
         m_overlay->setDocument(rdoc);
     }
 
+    if (!m_rotorProbeValid) {
+        m_rotorProbeValid = buildRotorProbeSpec(
+            rdoc, m_config,
+            m_rotorProbeLabelIndex,
+            m_rotorProbeRadius,
+            m_rotorProbeTheta0Deg);
+        if (m_rotorProbeValid) {
+            emit progress(tr("Rotor-frame probe: label=%1 r=%2 theta0=%3°")
+                .arg(m_rotorProbeLabelIndex)
+                .arg(m_rotorProbeRadius, 0, 'f', 4)
+                .arg(m_rotorProbeTheta0Deg, 0, 'f', 2));
+        }
+    }
+
     // Compute summary
     ResultsSummary summary = rdoc->computeSummary();
 
@@ -951,6 +1339,18 @@ void MotionRunner::onSolverFinished(bool success)
         sr.cumAngle = 0.0;
     }
     sr.summary = summary;
+    sr.elecAngleDeg = m_stepElecAngle;
+    sr.Ia = m_stepIa;
+    sr.Ib = m_stepIb;
+    sr.Ic = m_stepIc;
+    sr.hasRotorProbe = sampleRotorProbe(
+        rdoc, m_config,
+        m_rotorProbeValid,
+        m_rotorProbeRadius,
+        m_rotorProbeTheta0Deg,
+        m_currentStep,
+        sr.rotorProbeBr,
+        sr.rotorProbeBt);
 
     // --- Maxwell stress tensor torque (motor + rotation mode) ---
     // The standard virtual-work method (dE between successive steps) is
@@ -968,22 +1368,7 @@ void MotionRunner::onSolverFinished(bool success)
     // Capture B-field snapshot for iron loss computation
     if (m_config.calculateLosses) {
         BSnapshot snap;
-        for (int i = 0; i < (int)rdoc->elements.size(); i++) {
-            const auto &elm = rdoc->elements[i];
-            int lbl = elm.lbl;
-            if (lbl < 0 || lbl >= (int)rdoc->labels.size()) continue;
-            if (!rdoc->labels[lbl].calculateLosses) continue;
-            float azCentroid = 0.0f;
-            if (elm.p[0] >= 0 && elm.p[0] < (int)rdoc->nodes.size() &&
-                elm.p[1] >= 0 && elm.p[1] < (int)rdoc->nodes.size() &&
-                elm.p[2] >= 0 && elm.p[2] < (int)rdoc->nodes.size()) {
-                azCentroid = (float)((rdoc->nodes[elm.p[0]].A.real() +
-                                      rdoc->nodes[elm.p[1]].A.real() +
-                                      rdoc->nodes[elm.p[2]].A.real()) / 3.0);
-            }
-            snap.add((float)elm.cx, (float)elm.cy,
-                     (float)elm.B1.real(), (float)elm.B2.real(), azCentroid);
-        }
+        captureIronLossSnapshot(rdoc, m_config, snap, nullptr);
         m_bHistory.push_back(std::move(snap));
     }
 
@@ -1050,7 +1435,10 @@ void MotionRunner::onSolverFinished(bool success)
 
 QPixmap MotionRunner::captureFrame()
 {
-    QPixmap pixmap = m_dw->grab();
+    // Motion-frame captures should always show |B| so the animation is a
+    // consistent field movie rather than inheriting whatever live view mode
+    // happens to be selected in the UI.
+    QPixmap pixmap = renderFrameForDensity(DensityType::B_mag, false);
 
     // Defer PNG frame save to end of run (avoid per-step disk I/O)
     if (m_config.saveImages) {
@@ -1061,13 +1449,58 @@ QPixmap MotionRunner::captureFrame()
     }
 
     // Store full-resolution image for GIF assembly if video saving is enabled.
-    // When loop playback is on, skip the last frame (step == numSteps) so the
-    // GIF loops seamlessly without a duplicate/stutter at the wrap point.
+    // In loop-playback mode, omit the terminal duplicate position
+    // (step == numSteps) so the animation wraps without pausing.
     if (m_config.saveVideo) {
         bool isLastStep = (m_currentStep == m_config.numSteps);
         if (!m_config.loopPlayback || !isLastStep) {
             m_frames.push_back(pixmap.toImage());
         }
+    }
+
+    return pixmap;
+}
+
+QPixmap MotionRunner::renderFrameForDensity(DensityType density, bool forceLegend)
+{
+    if (!m_dw) return QPixmap();
+
+    DensityType prevDensity = DensityType::B_mag;
+    bool prevLegend = false;
+    bool prevAutoScale = true;
+    double prevScaleMin = 0.0;
+    double prevScaleMax = 1.0;
+    if (m_overlay) {
+        prevDensity = m_overlay->densityType();
+        prevLegend = m_overlay->showLegend();
+        prevAutoScale = m_overlay->autoScale();
+        prevScaleMin = m_overlay->scaleMin();
+        prevScaleMax = m_overlay->scaleMax();
+        m_overlay->setShowDensity(density);
+        if (density == DensityType::B_mag && prevAutoScale) {
+            if (!m_captureScaleInitialized) {
+                auto bounds = m_overlay->computePercentileBounds(1.0);
+                m_captureScaleMin = bounds.first;
+                m_captureScaleMax = bounds.second;
+                if (std::fabs(m_captureScaleMax - m_captureScaleMin) < 1e-30)
+                    m_captureScaleMax = m_captureScaleMin + 1.0;
+                m_captureScaleInitialized = true;
+            }
+            m_overlay->setScaleRange(m_captureScaleMin, m_captureScaleMax);
+            m_overlay->setAutoScale(false);
+        }
+        if (forceLegend)
+            m_overlay->setShowLegend(true);
+    }
+
+    QPixmap pixmap = m_dw->renderLiveFrame();
+
+    if (m_overlay) {
+        m_overlay->setShowDensity(prevDensity);
+        m_overlay->setScaleRange(prevScaleMin, prevScaleMax);
+        m_overlay->setAutoScale(prevAutoScale);
+        if (forceLegend)
+            m_overlay->setShowLegend(prevLegend);
     }
 
     return pixmap;
@@ -1091,6 +1524,15 @@ void MotionRunner::writeCSV()
     hdr << "Step" << "Displacement_X" << "Displacement_Y" << "Angle_deg";
     if (m_config.motorEnabled)
         hdr << "ElecAngle_deg" << "Ia_A" << "Ib_A" << "Ic_A";
+    bool hasRotorProbe = false;
+    for (const auto &r : m_results) {
+        if (r.hasRotorProbe) {
+            hasRotorProbe = true;
+            break;
+        }
+    }
+    if (hasRotorProbe)
+        hdr << "RotorProbe_Br_T" << "RotorProbe_Bt_T";
     if (m_config.csvFluxDensity)
         hdr << "B_max_T" << "B_min_T" << "B_avg_T";
     if (m_config.csvVectorPotential)
@@ -1181,6 +1623,14 @@ void MotionRunner::writeCSV()
                 << QString::number(r.Ia, 'f', 4)
                 << QString::number(r.Ib, 'f', 4)
                 << QString::number(r.Ic, 'f', 4);
+        }
+        if (hasRotorProbe) {
+            if (r.hasRotorProbe) {
+                row << QString::number(r.rotorProbeBr, 'e', 6)
+                    << QString::number(r.rotorProbeBt, 'e', 6);
+            } else {
+                row << "" << "";
+            }
         }
         if (m_config.csvFluxDensity) {
             row << QString::number(r.summary.B_max, 'e', 6)
@@ -1273,6 +1723,10 @@ void MotionRunner::restoreGeometry()
         m_doc->hasMesh = true;
     }
 
+    // Clear sliding band display
+    if (m_dw) m_dw->setSlidingBand(nullptr);
+    m_useSlidingBand = false;
+
     // Unfreeze the entire window hierarchy, clear cached frame, restore view
     if (m_dw) {
         m_dw->clearCachedFrame();
@@ -1291,4 +1745,28 @@ void MotionRunner::restoreGeometry()
         m_dw->setMaximumSize(m_backupMaxSize);
         m_dw->setViewTransform(m_backupViewOx, m_backupViewOy, m_backupViewMag);
     }
+}
+
+void MotionRunner::syncGeometryToStep(int step)
+{
+    if (!m_doc) return;
+
+    m_doc->nodes = m_backupNodes;
+    m_doc->segments = m_backupSegments;
+    m_doc->arcSegments = m_backupArcs;
+    m_doc->blockLabels = m_backupLabels;
+    m_doc->hasMesh = false;
+
+    if (step <= 0) {
+        return;
+    }
+
+    m_doc->selectGroup(m_config.groupNumber);
+    if (m_config.isRotation) {
+        m_doc->rotateSelected(m_config.cx, m_config.cy, m_config.angle * (double)step);
+    } else {
+        m_doc->translateSelected(m_config.dx * (double)step,
+                                 m_config.dy * (double)step);
+    }
+    m_doc->deselectAll();
 }

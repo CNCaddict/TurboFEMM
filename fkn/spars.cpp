@@ -476,8 +476,7 @@ int CBigLinProb::PCGSolve(int flag)
 			gpu->beginBatch();
 
 			// residual with V=0: Z = M^{-1} * b
-			gpu->precondJacobi(b, Z);
-			res_o = gpu->dot(Z, b);  // flush + read
+			res_o = gpu->precondJacobiDot(b, Z);  // flush + read
 			if(res_o==0) { gpu->endBatch(); gpu->downloadSolution(n, V); return 1; }
 
 			// if flag is false, initialize V with zeros
@@ -489,9 +488,8 @@ int CBigLinProb::PCGSolve(int flag)
 			gpu->axpy(1.0, b, R);             // batched: R = b - A*V
 
 			// form initial search direction: Z = M^{-1}*R, P = Z
-			gpu->precondJacobi(R, Z);         // batched
-			gpu->copy(Z, P);                  // batched
-			res = gpu->dot(Z, R);             // flush + read
+			res = gpu->precondJacobiDot(R, Z); // flush + read
+			gpu->copy(Z, P);                   // batched
 
 			// PCG iteration loop — batched GPU operations
 			int maxPcgIter = (n > 10000) ? n : 10 * n;
@@ -500,14 +498,12 @@ int CBigLinProb::PCGSolve(int flag)
 			bool gpuDiverged = false;
 
 			do{
-				gpu->spmv(P, U);           // U = A * P  (batched)
-				pAp = gpu->dot(P, U);      // flush + read pAp
+				pAp = gpu->spmvDot(P, U);  // U = A * P and pAp = P.U
 				del = res / pAp;
 
 				gpu->axpy(del, P, V);      // V += del * P  (batched)
 				gpu->axpy(-del, U, R);     // R -= del * U  (batched)
-				gpu->precondJacobi(R, Z);  // Z = M^{-1} * R  (batched)
-				res_new = gpu->dot(Z, R);  // flush + read res_new
+				res_new = gpu->precondJacobiDot(R, Z);  // Z = M^{-1} * R and res_new = Z.R
 				rho = res_new / res;
 				res = res_new;
 

@@ -7,6 +7,8 @@
 #include <vector>
 
 class FemmeDocument;
+struct SlidingBand;
+struct MotionConfig;
 
 // Edge from Triangle output (needed by solver for boundary condition mapping)
 struct MeshEdge {
@@ -28,7 +30,10 @@ public:
 
     // In-process mesh generation using Triangle library (no disk I/O).
     // Populates doc->meshNodes and doc->meshElements, plus edgesOut for solver.
-    bool generateMeshInProcess(FemmeDocument *doc, std::vector<MeshEdge> &edgesOut);
+    // If bandSetup is non-null, two interface circles are injected into the PSLG
+    // to create a sliding band for motion sweep optimisation.
+    bool generateMeshInProcess(FemmeDocument *doc, std::vector<MeshEdge> &edgesOut,
+                               SlidingBand *bandSetup = nullptr);
 
     // Refine existing mesh using Triangle's -r switch with per-element area constraints.
     // doc->meshNodes and doc->meshElements must already be populated.
@@ -43,6 +48,33 @@ public:
     // Needed before running the external fkn solver when the mesh was
     // generated in-process (e.g. by adaptive refinement).
     bool writeMeshFiles(FemmeDocument *doc);
+
+    // --- Sliding band for motion sweep optimisation ---
+
+    // Detect the airgap in a motor model and populate band radii/config.
+    // Returns true if a clear airgap was found between the motion group and
+    // the stationary geometry.  On success, band.innerRadius/outerRadius,
+    // airBlockLabel, numInterfaceNodes, cx, cy are filled in.
+    bool detectAirgap(FemmeDocument *doc, const MotionConfig &config,
+                      SlidingBand &band);
+
+    // Set up sliding band from a user-specified airgap radius.
+    // Places inner/outer interface circles at radius ± bandWidth/2,
+    // finds the air block label, and populates band config.
+    bool setupSlidingBand(FemmeDocument *doc, const MotionConfig &config,
+                          double innerR, double outerR, SlidingBand &band);
+
+    // After initial mesh generation (with interface circles), classify every
+    // node and element as rotor / stator / band and fill the index vectors
+    // in `band`.  Also reorders meshElements so the band is contiguous at
+    // the end.  Returns true on success.
+    bool classifyMeshForSlidingBand(FemmeDocument *doc, SlidingBand &band);
+
+    // Regenerate only the band elements (and edges) after rotating rotor
+    // mesh nodes.  Writes new triangles into doc->meshElements starting at
+    // band.bandElementStart and returns the full edge list (fixed + band).
+    void remeshBand(FemmeDocument *doc, SlidingBand &band,
+                    std::vector<MeshEdge> &edgesOut);
 
     // Path to the triangle executable
     void setTrianglePath(const QString &path) { m_trianglePath = path; }

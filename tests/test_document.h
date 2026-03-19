@@ -45,8 +45,14 @@ private slots:
     void steinmetzLossFormula();
     void ironLossFromBHistory();
     void rotorLossInverseTransform();
+    void rotorLossLabelAwareLookup();
     void conductiveEddyLossAutoCompute();
+    void ferromagneticSolidAutoThicknessLoss();
+    void rotorSynchronousFieldRemoved();
+    void rotorBackironAnnularProfileBias();
+    void accurateRotorBackironDiffusionMode();
     void azBasedSolidConductorLoss();
+    void azBasedSolidConductorLossSeparateBlocks();
     void steinmetzM19at60Hz();
 
     // 3-phase commutation

@@ -323,8 +323,15 @@ MotionDialog::MotionDialog(const QStringList &circuitNames,
     m_calculateLosses->setChecked(false);
     m_calculateLosses->setToolTip(tr("Compute per-element iron losses during motion sweep.\n"
                                       "Requires blocks with 'Calculate iron losses' enabled\n"
-                                      "and materials with Steinmetz coefficients set."));
+                                      "and materials with either loss data or conductivity + density."));
     lossLayout->addWidget(m_calculateLosses);
+
+    m_accurateSolidLosses = new QCheckBox(tr("Accurate solid rotor losses (slower)"));
+    m_accurateSolidLosses->setChecked(false);
+    m_accurateSolidLosses->setToolTip(tr("Optional slower post-processor for rotating solid steel regions.\n"
+                                         "Uses a boundary-driven diffusion model for rotor backiron.\n"
+                                         "Leave off for normal fast sweeps."));
+    lossLayout->addWidget(m_accurateSolidLosses);
 
     auto *lossFreqLayout = new QFormLayout;
     m_motorRPM = new QDoubleSpinBox;
@@ -346,6 +353,14 @@ MotionDialog::MotionDialog(const QStringList &circuitNames,
                                     "Set manually for non-motor applications."));
     lossFreqLayout->addRow(tr("Operating frequency:"), m_operatingFreq);
     lossLayout->addLayout(lossFreqLayout);
+
+    auto updateLossControls = [this](bool checked) {
+        m_accurateSolidLosses->setEnabled(checked);
+        m_motorRPM->setEnabled(checked);
+        m_operatingFreq->setEnabled(checked);
+    };
+    connect(m_calculateLosses, &QCheckBox::toggled,
+            this, updateLossControls);
 
     rightCol->addWidget(lossBox);
 
@@ -403,6 +418,7 @@ MotionDialog::MotionDialog(const QStringList &circuitNames,
     m_csvForceTorque = settings.value("csvForceTorque", true).toBool();
     m_csvIronLoss = settings.value("csvIronLoss", false).toBool();
     m_calculateLosses->setChecked(settings.value("calculateLosses", false).toBool());
+    m_accurateSolidLosses->setChecked(settings.value("accurateSolidLosses", false).toBool());
     m_motorRPM->setValue(settings.value("motorRPM", 0.0).toDouble());
     m_operatingFreq->setValue(settings.value("operatingFreqHz", 0.0).toDouble());
 
@@ -437,6 +453,7 @@ MotionDialog::MotionDialog(const QStringList &circuitNames,
     m_paramStack->setCurrentIndex(m_motionType->currentIndex());
     // Sync motor group enabled state
     m_motorGroup->setEnabled(m_motorEnabled->isChecked());
+    updateLossControls(m_calculateLosses->isChecked());
 
     // Save settings on every close path (Run, Cancel, window close button)
     connect(this, &QDialog::finished, this, &MotionDialog::saveSettings);
@@ -608,6 +625,7 @@ MotionConfig MotionDialog::config() const
     c.csvForceTorque = m_csvForceTorque;
     c.csvIronLoss = m_csvIronLoss;
     c.calculateLosses = m_calculateLosses->isChecked();
+    c.accurateSolidLosses = m_accurateSolidLosses->isChecked();
     c.motorRPM = m_motorRPM->value();
     c.operatingFreqHz = m_operatingFreq->value();
 
@@ -624,6 +642,7 @@ MotionConfig MotionDialog::config() const
     c.motorOptimalAngle = m_motorOptimalAngleValue;
     c.motorOptimized = m_motorOptimized;
     c.motorReversePhase = m_motorReversePhase->isChecked();
+
     return c;
 }
 
@@ -650,6 +669,7 @@ void MotionDialog::saveSettings()
     settings.setValue("csvForceTorque", m_csvForceTorque);
     settings.setValue("csvIronLoss", m_csvIronLoss);
     settings.setValue("calculateLosses", m_calculateLosses->isChecked());
+    settings.setValue("accurateSolidLosses", m_accurateSolidLosses->isChecked());
     settings.setValue("motorRPM", m_motorRPM->value());
     settings.setValue("operatingFreqHz", m_operatingFreq->value());
     // Motor settings

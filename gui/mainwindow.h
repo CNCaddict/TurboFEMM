@@ -99,6 +99,7 @@ private:
     void createStatusBar();
     void createLogPanel();
     void appendLog(const QString &msg);
+    QString m_lastLogPrefix;  // for in-place progress updates (e.g. "PCG")
 
     DrawingWidget *currentDrawing();
     FemmeDocument *currentDocument();

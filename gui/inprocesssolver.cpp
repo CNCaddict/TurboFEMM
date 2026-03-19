@@ -207,6 +207,11 @@ bool InProcessSolver::solveExistingMesh(FemmeDocument *doc,
     int numMeshEls = (int)doc->meshElements.size();
     int numMeshEdges = (int)edges.size();
 
+    if (numMeshNodes <= 0 || numMeshEls <= 0 || numMeshEdges <= 0) {
+        m_lastError = "Mesh is incomplete (nodes/elements/edges missing)";
+        return false;
+    }
+
     std::vector<InMemMeshNode> meshNodes(numMeshNodes);
     for (int i = 0; i < numMeshNodes; i++) {
         meshNodes[i].x = doc->meshNodes[i].x;

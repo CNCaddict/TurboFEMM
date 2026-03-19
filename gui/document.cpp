@@ -131,6 +131,8 @@ bool FemmeDocument::loadFromFile(const QString &path)
     comment.clear();
     prevSoln.clear();
     prevType = 0;
+    slidingBandInnerRadius = 0.0;
+    slidingBandOuterRadius = 0.0;
 
     // Temp property accumulators
     FPointProp pprop;
@@ -196,6 +198,16 @@ bool FemmeDocument::loadFromFile(const QString &path)
         }
         else if (token == "[prevtype]") {
             prevType = val.toInt();
+        }
+        else if (token == "[slidingbandradius]") {
+            // Legacy: single radius → treat as disabled (user must set both)
+            slidingBandInnerRadius = 0.0;
+        }
+        else if (token == "[slidingbandinnerradius]") {
+            slidingBandInnerRadius = val.toDouble();
+        }
+        else if (token == "[slidingbandouterradius]") {
+            slidingBandOuterRadius = val.toDouble();
         }
 
         // ---- Point Properties ----
@@ -590,7 +602,6 @@ bool FemmeDocument::saveToFile(const QString &path)
         out << "[PrevSoln]    =  \"" << prevSoln << "\"\n";
     if (prevType != 0)
         out << "[PrevType]    =  " << prevType << "\n";
-
     // Point properties
     out << "[PointProps]   = " << pointProps.size() << "\n";
     for (const auto &pp : pointProps) {

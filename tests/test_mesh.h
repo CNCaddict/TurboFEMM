@@ -57,6 +57,13 @@ private slots:
 
     // writeMeshFiles round-trip (in-memory mesh → disk → fkn-compatible)
     void writeMeshFilesRoundTrip();
+
+    // Sliding band
+    void slidingBandDetectAirgapLRK();
+    void slidingBandManualRadiiPreserved();
+    void slidingBandClassifyMesh();
+    void slidingBandRemeshConsistency();
+    void slidingBandFixedNodesStayFixed();
 };
 
 #endif // TEST_MESH_H

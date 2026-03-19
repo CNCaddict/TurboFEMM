@@ -7,18 +7,17 @@ using namespace metal;
 // The CPU-side backend converts double↔float at boundaries.
 // =============================================================
 
-// Symmetric CSR SpMV: Y = A * X
-// Matrix stored as upper triangle only (col >= row) with separate diagonal.
-// Each thread handles one row. Off-diagonal entries contribute to both
-// Y[row] (upper triangle) and Y[col] (lower triangle via symmetry).
-// The lower-triangle contribution uses atomic_fetch_add_explicit for thread safety.
+// Full CSR SpMV: Y = A * X
+// The Metal backend expands the solver's symmetric upper-triangular CSR
+// into a full CSR structure at upload time so each GPU thread owns one row.
+// This avoids atomic writes and removes the need for a separate zero pass.
 kernel void spmv_symmetric(
     device const float* diag       [[buffer(0)]],   // diagonal [n]
     device const int*    row_ptr    [[buffer(1)]],   // CSR row pointers [n+1]
     device const int*    col_idx    [[buffer(2)]],   // column indices [nnz]
     device const float* values     [[buffer(3)]],   // off-diagonal values [nnz]
     device const float* X          [[buffer(4)]],   // input vector [n]
-    device atomic_float* Y         [[buffer(5)]],   // output vector [n] (atomic for symmetry)
+    device float* Y                [[buffer(5)]],   // output vector [n]
     constant int& n                 [[buffer(6)]],
     uint tid [[thread_position_in_grid]])
 {
@@ -33,13 +32,54 @@ kernel void spmv_symmetric(
     for (int j = start; j < end; j++) {
         int col = col_idx[j];
         float val = values[j];
-
-        sum += val * X[col];                                    // upper triangle
-        atomic_fetch_add_explicit(&Y[col], val * X[row],       // lower triangle (symmetry)
-                                  memory_order_relaxed);
+        sum += val * X[col];
     }
 
-    atomic_fetch_add_explicit(&Y[row], sum, memory_order_relaxed);
+    Y[row] = sum;
+}
+
+// Full CSR SpMV with fused dot accumulation:
+// computes Y = A * X and partial sums for X . Y.
+kernel void spmv_dot_partial(
+    device const float* diag       [[buffer(0)]],
+    device const int*    row_ptr    [[buffer(1)]],
+    device const int*    col_idx    [[buffer(2)]],
+    device const float* values     [[buffer(3)]],
+    device const float* X          [[buffer(4)]],
+    device float* Y                [[buffer(5)]],
+    device float* partial_sums     [[buffer(6)]],
+    constant int& n                 [[buffer(7)]],
+    uint tid    [[thread_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],
+    uint gid    [[threadgroup_position_in_grid]],
+    uint tgSize [[threads_per_threadgroup]])
+{
+    threadgroup float shared[256];
+
+    float dotVal = 0.0f;
+    if (tid < (uint)n) {
+        int row = (int)tid;
+        float sum = diag[row] * X[row];
+        int start = row_ptr[row];
+        int end = row_ptr[row + 1];
+        for (int j = start; j < end; j++) {
+            sum += values[j] * X[col_idx[j]];
+        }
+        Y[row] = sum;
+        dotVal = X[row] * sum;
+    }
+    shared[lid] = dotVal;
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = tgSize / 2; stride > 0; stride >>= 1) {
+        if (lid < stride)
+            shared[lid] += shared[lid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (lid == 0)
+        partial_sums[gid] = shared[0];
 }
 
 // Jacobi preconditioner: Y[i] = X[i] / diag[i]
@@ -52,6 +92,41 @@ kernel void jacobi_precond(
 {
     if (tid >= (uint)n) return;
     Y[tid] = X[tid] / diag[tid];
+}
+
+// Jacobi preconditioner with fused dot accumulation:
+// computes Y = M^{-1} * X and partial sums for X . Y.
+kernel void jacobi_precond_dot_partial(
+    device const float* diag       [[buffer(0)]],
+    device const float* X          [[buffer(1)]],
+    device float* Y                [[buffer(2)]],
+    device float* partial_sums     [[buffer(3)]],
+    constant int& n                 [[buffer(4)]],
+    uint tid    [[thread_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],
+    uint gid    [[threadgroup_position_in_grid]],
+    uint tgSize [[threads_per_threadgroup]])
+{
+    threadgroup float shared[256];
+
+    float dotVal = 0.0f;
+    if (tid < (uint)n) {
+        float y = X[tid] / diag[tid];
+        Y[tid] = y;
+        dotVal = X[tid] * y;
+    }
+    shared[lid] = dotVal;
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = tgSize / 2; stride > 0; stride >>= 1) {
+        if (lid < stride)
+            shared[lid] += shared[lid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (lid == 0)
+        partial_sums[gid] = shared[0];
 }
 
 // AXPY: Y += alpha * X

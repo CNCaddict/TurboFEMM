@@ -36,8 +36,14 @@ public:
     // Y = A * X  (symmetric CSR SpMV)
     virtual void spmv(const double* X, double* Y) = 0;
 
+    // Compute Y = A * X and return X . Y in one GPU pass pair.
+    virtual double spmvDot(const double* X, double* Y) = 0;
+
     // Y = M^{-1} * X  (Jacobi preconditioner: Y[i] = X[i] / diag[i])
     virtual void precondJacobi(const double* X, double* Y) = 0;
+
+    // Compute Y = M^{-1} * X and return X . Y in one GPU pass pair.
+    virtual double precondJacobiDot(const double* X, double* Y) = 0;
 
     // dot = X . Y  (returns scalar to CPU)
     virtual double dot(const double* X, const double* Y) = 0;

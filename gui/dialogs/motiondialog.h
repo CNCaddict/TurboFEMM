@@ -43,6 +43,7 @@ struct MotionConfig {
 
     // --- Iron loss ---
     bool calculateLosses = false; // global iron loss toggle
+    bool accurateSolidLosses = false; // slower boundary-driven solid rotor loss mode
     double operatingFreqHz = 0.0; // electrical frequency for loss computation (Hz)
     double motorRPM = 0.0;        // motor RPM (for frequency derivation)
 
@@ -59,6 +60,7 @@ struct MotionConfig {
     double motorOptimalAngle = 0.0;     // result (degrees, read-only)
     bool motorOptimized = false;
     bool motorReversePhase = false;     // reverse phase tracking direction
+
 };
 
 // Callback type for phase angle optimisation
@@ -118,6 +120,7 @@ private:
     bool m_csvIronLoss = false;
 
     QCheckBox *m_calculateLosses;
+    QCheckBox *m_accurateSolidLosses;
     QDoubleSpinBox *m_motorRPM;
     QDoubleSpinBox *m_operatingFreq;
 

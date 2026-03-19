@@ -22,6 +22,7 @@ struct BSnapshot {
     std::vector<float> cx, cy;  // element centroids
     std::vector<float> bx, by;  // B components (Bx, By real part)
     std::vector<float> az;      // vector potential Az at centroid
+    std::vector<int> label;     // block label index for label-aware lookup
     int numElements = 0;
 
     void reserve(int n) {
@@ -30,15 +31,17 @@ struct BSnapshot {
         bx.reserve(n);
         by.reserve(n);
         az.reserve(n);
+        label.reserve(n);
     }
 
     void add(float centroidX, float centroidY, float Bx, float By,
-             float Az = 0.0f) {
+             float Az = 0.0f, int blockLabel = -1) {
         cx.push_back(centroidX);
         cy.push_back(centroidY);
         bx.push_back(Bx);
         by.push_back(By);
         az.push_back(Az);
+        label.push_back(blockLabel);
         numElements++;
     }
 
@@ -46,6 +49,7 @@ struct BSnapshot {
         cx.clear(); cy.clear();
         bx.clear(); by.clear();
         az.clear();
+        label.clear();
         numElements = 0;
     }
 };
@@ -86,7 +90,7 @@ public:
 
     // Find nearest element index for a query point
     // Returns -1 if no data
-    int findNearest(float qx, float qy) const {
+    int findNearest(float qx, float qy, int labelFilter = -1) const {
         if (!m_snap || m_snap->numElements == 0)
             return -1;
 
@@ -107,6 +111,9 @@ public:
                     continue;
                 const auto &cell = m_grid[(size_t)cy * m_nx + cx];
                 for (int idx : cell) {
+                    if (labelFilter >= 0 && idx < (int)m_snap->label.size() &&
+                        m_snap->label[idx] != labelFilter)
+                        continue;
                     float ddx = m_snap->cx[idx] - qx;
                     float ddy = m_snap->cy[idx] - qy;
                     float d2 = ddx * ddx + ddy * ddy;
@@ -122,6 +129,9 @@ public:
 
         // Fallback: brute-force (shouldn't happen with proper grid sizing)
         for (int i = 0; i < m_snap->numElements; i++) {
+            if (labelFilter >= 0 && i < (int)m_snap->label.size() &&
+                m_snap->label[i] != labelFilter)
+                continue;
             float ddx = m_snap->cx[i] - qx;
             float ddy = m_snap->cy[i] - qy;
             float d2 = ddx * ddx + ddy * ddy;
@@ -152,8 +162,11 @@ public:
 
     // Lookup B and Az together (single spatial search)
     // Returns (bx, by, az)
-    std::tuple<float, float, float> lookupAll(float qx, float qy) const {
-        int idx = findNearest(qx, qy);
+    std::tuple<float, float, float> lookupAll(float qx, float qy,
+                                              int labelFilter = -1) const {
+        int idx = findNearest(qx, qy, labelFilter);
+        if (idx < 0 && labelFilter >= 0)
+            idx = findNearest(qx, qy);
         if (idx >= 0)
             return {m_snap->bx[idx], m_snap->by[idx], m_snap->az[idx]};
         return {0.0f, 0.0f, 0.0f};

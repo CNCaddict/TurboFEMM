@@ -67,6 +67,13 @@ public:
     QString prevSoln;
     int prevType = 0;
 
+    // --- Sliding band mesh optimisation ---
+    // --- Sliding band mesh optimisation ---
+    // User specifies inner and outer radii of the band directly.
+    // Both must be in the airgap air region. 0 = disabled.
+    double slidingBandInnerRadius = 0.0;
+    double slidingBandOuterRadius = 0.0;
+
     // --- Geometry ---
     std::vector<FNode>        nodes;
     std::vector<FSegment>     segments;
